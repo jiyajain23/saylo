@@ -1,0 +1,12 @@
+fastapi==0.115.12
+uvicorn[standard]==0.34.2
+pydantic==2.11.4
+python-dotenv==1.1.0
+requests==2.32.3
+# Semantic embeddings (uses pre-built wheels, no compiler needed)
+sentence-transformers==3.4.1
+torch==2.6.0
+# Audio analysis (pre-built wheels)
+librosa==0.10.2
+numpy>=2.0.0
+soundfile==0.12.1

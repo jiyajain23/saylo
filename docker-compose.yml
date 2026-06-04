@@ -1,0 +1,24 @@
+version: "3.8"
+services:
+  api:
+    build: ./apps/api
+    ports:
+      - "5000:5000"
+    environment:
+      NODE_ENV: production
+      PORT: 5000
+      DATABASE_URL: file:/app/dev.db
+      ANALYSIS_SERVICE_URL: http://analysis:8000
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+    depends_on:
+      - analysis
+
+  analysis:
+    build: ./services/analysis-service
+    ports:
+      - "8000:8000"
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+
+volumes: {}
