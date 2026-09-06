@@ -3,10 +3,27 @@ uvicorn[standard]==0.34.2
 pydantic==2.11.4
 python-dotenv==1.1.0
 requests==2.32.3
-# Semantic embeddings (uses pre-built wheels, no compiler needed)
+
+# ── LangGraph / LangChain ──────────────────────────────────────────────────────
+langgraph>=0.2.0
+langchain>=0.3.0
+langchain-google-genai>=2.0.0
+
+# ── HuggingFace / PyTorch ──────────────────────────────────────────────────────
 sentence-transformers==3.4.1
+transformers>=4.40.0
 torch==2.6.0
-# Audio analysis (pre-built wheels)
+torchaudio>=2.1.0
+accelerate>=0.30.0
+
+# ── Audio analysis ─────────────────────────────────────────────────────────────
 librosa==0.10.2
 numpy>=2.0.0
 soundfile==0.12.1
+scipy>=1.12.0
+
+# ── Google Gemini (insight agent) ─────────────────────────────────────────────
+google-generativeai>=0.8.0
+
+# ── Misc ───────────────────────────────────────────────────────────────────────
+scikit-learn>=1.4.0

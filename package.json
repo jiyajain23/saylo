@@ -11,9 +11,9 @@
     "dev:all": "npm-run-all -s dev:clean dev",
     "dev": "npm-run-all -p dev:api dev:web",
     "dev:api": "cd backend && uvicorn main:app --host 0.0.0.0 --port 5000 --reload",
-    "dev:web": "npm --workspace frontend run dev",
-    "build:web": "npm --workspace frontend run build",
-    "lint:web": "npm --workspace frontend run lint"
+    "dev:web": "npm --workspace @speakez-JJ/frontend run dev",
+    "build:web": "npm --workspace @speakez-JJ/frontend run build",
+    "lint:web": "npm --workspace @speakez-JJ/frontend run lint"
   },
   "devDependencies": {
     "kill-port": "^2.0.1",

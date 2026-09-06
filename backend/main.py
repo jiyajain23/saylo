@@ -81,6 +81,8 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 @app.on_event("startup")
 async def on_startup():
+    from db import init_db
+    await init_db()
     port = os.environ.get("PORT", "5000")
     logger.info(f"[api] SpeakEZ Python backend starting on :{port}")
     logger.info("[api] Allowed CORS origins", _allowed_origins)

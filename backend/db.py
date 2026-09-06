@@ -30,3 +30,10 @@ async def get_db() -> AsyncSession:  # type: ignore[return]
     """FastAPI dependency that yields a database session."""
     async with AsyncSessionLocal() as session:
         yield session
+
+
+async def init_db() -> None:
+    """Create all tables on first run. Safe to call on every startup."""
+    from models.schemas import Base  # import here to avoid circular deps
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)

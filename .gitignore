@@ -50,3 +50,9 @@ Thumbs.db
 .vscode/settings.json
 *.swp
 *.swo
+
+# Trained model weights (use HuggingFace Hub instead)
+models/
+*.safetensors
+*.bin
+training_args.bin

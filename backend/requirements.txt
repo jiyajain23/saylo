@@ -17,4 +17,4 @@ websockets==14.2
 slowapi==0.1.9
 
 # CUID generation (compatible with Prisma's cuid())
-cuid2==2.0.3
+cuid2==2.0.1

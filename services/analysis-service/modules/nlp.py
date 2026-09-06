@@ -1,54 +1,39 @@
 """
-Semantic NLP Module — replaces regex keyword matching with sentence-transformer embeddings.
+Semantic NLP Module — uses the fine-tuned STAR DistilBERT classifier as the
+primary structure/relevance scorer, with sentence-transformer similarity as
+a secondary method and regex as a final fallback.
 
-How it works:
-1. Embeds the full user answer and the question/context using a lightweight local model
-   (all-MiniLM-L6-v2, ~22MB, runs on CPU in ~50ms).
-2. Computes cosine similarity between the answer and the question to get a "relevance" score
-   that reflects *meaning*, not keyword overlap.
-3. Uses the same embeddings to check structural patterns by comparing to scenario-specific
-   "gold standard" template phrases.
+Model priority:
+  1. Fine-tuned STAR classifier (models/star_answer/) — trained on real interview data
+  2. Sentence-transformer semantic similarity against adaptive templates
+  3. Regex pattern matching (legacy fallback)
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import re
 from functools import lru_cache
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+
+from modules.template_store import get_templates
 
 logger = logging.getLogger(__name__)
 
 MODEL_NAME = "all-MiniLM-L6-v2"
 
-# ── Scenario-specific "gold standard" templates ────────────────────────────────
-# These represent what a high-scoring answer LOOKS like for each scenario.
-# Semantic similarity to these templates drives the structure score.
-SCENARIO_TEMPLATES: Dict[str, List[str]] = {
-    "INTERVIEW": [
-        "In my previous role, I was faced with a situation where I had to solve a difficult problem. "
-        "My task was to improve the outcome. I took specific actions including coordinating with my team "
-        "and measuring results. As a result, we achieved a measurable improvement.",
-        "I managed a cross-functional project under tight constraints and delivered it on schedule. "
-        "The impact was a 20% reduction in cost and improved team velocity.",
-    ],
-    "PITCH": [
-        "The core problem we are solving is a significant pain point for our target market. "
-        "Our solution uniquely addresses this because of our differentiated approach. "
-        "We have evidence of traction, including early customers and metrics. "
-        "We are asking for investment to scale our go-to-market strategy.",
-        "The market size is large, our team has deep domain expertise, "
-        "and we have a clear and defensible business model.",
-    ],
-    "MEETING": [
-        "The current status of the project is on track. The key decision we need to make today is "
-        "which approach to take. I recommend option A because it reduces risk. "
-        "The action item will be owned by the engineering team with a deadline of next Friday.",
-        "We have three blockers. For each one I have a proposed resolution and an owner assigned.",
-    ],
-}
+# Path to fine-tuned STAR DistilBERT classifier
+_STAR_MODEL_PATH = os.environ.get(
+    "STAR_MODEL_PATH",
+    os.path.join(os.path.dirname(__file__), "..", "..", "..", "models", "star_answer")
+)
+
+# Templates are loaded dynamically at runtime via get_templates(scenario)
+# so each call picks up any new high-confidence answers from the adaptive store.
+
 
 # Weak language patterns that reduce clarity — kept as regex since this is deterministic
 WEAK_LANGUAGE_RE = re.compile(
@@ -63,8 +48,30 @@ VAGUE_OPENER_RE = re.compile(
 
 
 @lru_cache(maxsize=1)
+def _get_star_model():
+    """Load the fine-tuned STAR DistilBERT classifier (3-output regression)."""
+    import pathlib
+    model_path = pathlib.Path(_STAR_MODEL_PATH).resolve()
+    if not model_path.exists():
+        logger.info("[nlp] STAR model not found at %s — skipping", model_path)
+        return None, None
+    try:
+        from transformers import AutoTokenizer, AutoModelForSequenceClassification  # type: ignore
+        import torch  # type: ignore
+        logger.info("[nlp] loading STAR classifier from %s", model_path)
+        tokenizer = AutoTokenizer.from_pretrained(str(model_path))
+        model = AutoModelForSequenceClassification.from_pretrained(str(model_path))
+        model.eval()
+        logger.info("[nlp] STAR classifier loaded — outputs: structure, relevance, overall")
+        return tokenizer, model
+    except Exception as exc:
+        logger.warning("[nlp] STAR classifier load failed: %s", exc)
+        return None, None
+
+
+@lru_cache(maxsize=1)
 def _get_model():
-    """Load model once and cache. LRU with maxsize=1 acts as a singleton."""
+    """Load MiniLM semantic model (secondary/fallback scorer)."""
     try:
         from sentence_transformers import SentenceTransformer  # type: ignore
         logger.info("[nlp] loading sentence-transformer model: %s", MODEL_NAME)
@@ -73,9 +80,6 @@ def _get_model():
         return model
     except ImportError:
         logger.warning("[nlp] sentence-transformers not installed — falling back to regex NLP")
-        return None
-    except Exception as exc:
-        logger.error("[nlp] failed to load model: %s", exc)
         return None
 
 
@@ -119,13 +123,46 @@ def _semantic_relevance(model, user_text: str, context: Dict[str, Any]) -> float
         return 0.72
 
 
+def _star_classify(user_text: str, scenario: str) -> Optional[Tuple[float, float]]:
+    """
+    Run the fine-tuned STAR DistilBERT classifier.
+    Returns (structure_score, relevance_score) both in [0, 1], or None if unavailable.
+    Model was trained with 3 regression outputs: [structure_score, relevance_score, overall].
+    """
+    tokenizer, model = _get_star_model()
+    if tokenizer is None:
+        return None
+    try:
+        import torch
+        # Encode question+answer as a pair; use scenario as pseudo-question context
+        question_ctx = f"[{scenario}] Evaluate this answer for structure and relevance:"
+        inputs = tokenizer(
+            question_ctx, user_text,
+            return_tensors="pt",
+            truncation=True,
+            max_length=512,
+            padding=True,
+        )
+        with torch.no_grad():
+            outputs = model(**inputs)
+        logits = outputs.logits.squeeze().tolist()
+        if isinstance(logits, float):
+            logits = [logits, logits, logits]
+        # Clamp to [0.1, 0.95]
+        structure = round(max(0.10, min(0.95, float(logits[0]))), 3)
+        relevance = round(max(0.10, min(0.95, float(logits[1]))), 3)
+        return structure, relevance
+    except Exception as exc:
+        logger.warning("[nlp] STAR classifier inference failed: %s", exc)
+        return None
+
+
 def _semantic_structure(model, user_text: str, scenario: str) -> float:
     """
-    Compare the user's answer to gold-standard templates for the scenario.
-    Returns similarity score in [0.55, 0.95].
+    Score structure by comparing user input to adaptive gold-standard templates.
+    Templates are loaded at runtime from template_store (per-scenario).
     """
-    templates = SCENARIO_TEMPLATES.get(scenario, SCENARIO_TEMPLATES["INTERVIEW"])
-
+    templates = get_templates(scenario)  # adaptive, loaded at call time
     try:
         all_texts = [user_text[:1000]] + templates
         embeddings = model.encode(all_texts, normalize_embeddings=True)
@@ -215,16 +252,24 @@ def analyze_language(text: str, context: Dict[str, Any], scenario: str = "INTERV
     clarity = round(max(0.45, min(clarity, 0.95)), 3)
 
     # ── Semantic scoring (structure + relevance) ───────────────────────────────
-    model = _get_model()
+    # Priority 1: Fine-tuned STAR classifier
+    star_result = _star_classify(text[:1000], scenario)
 
-    if model is not None:
-        structure = _semantic_structure(model, text, scenario)
-        relevance = _semantic_relevance(model, text, context)
-        method = "semantic"
+    if star_result is not None:
+        structure, relevance = star_result
+        method = "star_classifier"
     else:
-        structure = _regex_fallback_structure(text, scenario)
-        relevance = _regex_fallback_relevance(text, context)
-        method = "regex_fallback"
+        # Priority 2: MiniLM sentence-transformer
+        model = _get_model()
+        if model is not None:
+            structure = _semantic_structure(model, text, scenario)
+            relevance = _semantic_relevance(model, text, context)
+            method = "semantic"
+        else:
+            # Priority 3: Regex fallback
+            structure = _regex_fallback_structure(text, scenario)
+            relevance = _regex_fallback_relevance(text, context)
+            method = "regex_fallback"
 
     logger.info("[nlp] scoring method=%s structure=%.3f relevance=%.3f clarity=%.3f",
                 method, structure, relevance, clarity)
