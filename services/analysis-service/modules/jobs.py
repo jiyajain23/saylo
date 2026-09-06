@@ -21,7 +21,7 @@ def generate_job_recommendations(scenario: str, context: Dict[str, Any], confide
     jobs.append({
         "role": role,
         "match": match_base,
-        "explanation": primary_explanation,
+        "explanation": primary_explanation, 
         "url": f"https://www.linkedin.com/jobs/search/?keywords={urllib.parse.quote(role)}"
     })
     

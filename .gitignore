@@ -30,9 +30,8 @@ __pycache__/
 *.pyd
 .Python
 *.egg-info/
-dist/
-# .venv/
-# venv/
+.venv/
+venv/
 env/
 .env/
 
@@ -51,6 +50,3 @@ Thumbs.db
 .vscode/settings.json
 *.swp
 *.swo
-
-# Prisma migration dev artifacts (keep migrations, not lock files)
-prisma/migrations/**/migration_lock.toml
