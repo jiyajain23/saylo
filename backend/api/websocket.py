@@ -248,6 +248,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                     await _send(ws, {"type": "error", "message": "missing_session_id"})
                     continue
                 bound_session_id = session_id
+                logger.info(f"[ws] received hello for session: {session_id}")
                 continue
 
             # ── Guard: session hijacking prevention ──

@@ -24,7 +24,11 @@ TARGET_SR = 16000   # wav2vec2 expects 16kHz mono
 @lru_cache(maxsize=1)
 def _get_model_processor():
     try:
-        from transformers import AutoProcessor, AutoModelForAudioClassification  # type: ignore
+        try:
+            from transformers import AutoProcessor, AutoModelForAudioClassification  # type: ignore
+        except (ImportError, AttributeError):
+            from transformers.models.auto.processing_auto import AutoProcessor  # type: ignore
+            from transformers.models.auto.modeling_auto import AutoModelForAudioClassification  # type: ignore
         import torch  # type: ignore
         logger.info("[voice-emotion] loading model: %s (this may take a moment)", MODEL_NAME)
         processor = AutoProcessor.from_pretrained(MODEL_NAME)

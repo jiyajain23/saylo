@@ -66,6 +66,7 @@ async def health():
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
+    logger.info("[api] incoming WebSocket client connected on /ws")
     await websocket_endpoint(ws)
 
 

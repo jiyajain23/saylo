@@ -5,10 +5,22 @@ Uses the same SQLite database file via DATABASE_URL env var.
 """
 
 import os
-
+from pathlib import Path
+from dotenv import load_dotenv
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+# Load backend/.env explicitly
+_env_path = Path(__file__).resolve().parent / ".env"
+load_dotenv(_env_path, override=True)
+
 _DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite+aiosqlite:///./dev.db")
+
+# If legacy Prisma URL format is encountered (e.g. file:./dev.db), convert to SQLAlchemy
+if _DATABASE_URL.startswith("file:"):
+    _path = _DATABASE_URL.replace("file:", "", 1)
+    _DATABASE_URL = f"sqlite+aiosqlite:///{_path}"
+elif not _DATABASE_URL.startswith("sqlite+aiosqlite://") and _DATABASE_URL.startswith("sqlite://"):
+    _DATABASE_URL = _DATABASE_URL.replace("sqlite://", "sqlite+aiosqlite://", 1)
 
 # SQLite async engine. echo=True in dev to log queries.
 _IS_DEV = os.environ.get("NODE_ENV") != "production"

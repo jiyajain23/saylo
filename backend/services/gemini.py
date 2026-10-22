@@ -35,7 +35,7 @@ GEMINI_LIVE_ENDPOINT = (
 
 
 def _live_model() -> str:
-    return os.environ.get("GEMINI_LIVE_MODEL", "gemini-2.0-flash-live-001")
+    return os.environ.get("GEMINI_LIVE_MODEL", "gemini-3.8-live")
 
 
 # ── System instruction builder ─────────────────────────────────────────────────
@@ -74,9 +74,11 @@ def _setup_message(
     persona_id: Optional[str],
     pressure_level: Optional[int],
 ) -> dict:
+    m = _live_model()
+    model_name = m if m.startswith("models/") else f"models/{m}"
     return {
         "setup": {
-            "model": f"models/{_live_model()}",
+            "model": model_name,
             "generation_config": {"response_modalities": ["AUDIO"]},
             "system_instruction": {
                 "parts": [{"text": build_system_instruction(scenario, context, persona_id, pressure_level)}]
@@ -176,8 +178,15 @@ class GeminiLiveSession:
                     logger.error("[gemini-live] failed to parse message")
                     continue
 
-                if response.get("setupComplete"):
+                if "error" in response:
+                    logger.error("[gemini-live] Google Live error: %s", response["error"])
+                    if self._on_error:
+                        self._on_error(f"gemini_live_error: {response['error'].get('message', 'unknown')}")
+                    continue
+
+                if "setupComplete" in response:
                     self._setup_complete = True
+                    logger.info("[gemini-live] setupComplete received from Google; sending %d queued messages", len(self._pending))
                     for msg in self._pending:
                         await self._ws.send(msg)
                     self._pending.clear()
@@ -185,6 +194,7 @@ class GeminiLiveSession:
 
                 text = _extract_text(response)
                 if text:
+                    logger.info("[gemini-live] received AI text: %s", text[:60])
                     result = self._on_text(text)
                     if asyncio.iscoroutine(result):
                         await result

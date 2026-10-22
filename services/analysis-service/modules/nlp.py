@@ -25,16 +25,6 @@ logger = logging.getLogger(__name__)
 
 MODEL_NAME = "all-MiniLM-L6-v2"
 
-# Path to fine-tuned STAR DistilBERT classifier
-_STAR_MODEL_PATH = os.environ.get(
-    "STAR_MODEL_PATH",
-    os.path.join(os.path.dirname(__file__), "..", "..", "..", "models", "star_answer")
-)
-
-# Templates are loaded dynamically at runtime via get_templates(scenario)
-# so each call picks up any new high-confidence answers from the adaptive store.
-
-
 # Weak language patterns that reduce clarity — kept as regex since this is deterministic
 WEAK_LANGUAGE_RE = re.compile(
     r"\b(thing|stuff|basically|sort of|kind of|i guess|maybe|like|you know|whatever)\b",
@@ -46,23 +36,39 @@ VAGUE_OPENER_RE = re.compile(
     re.I,
 )
 
+def _get_star_path() -> Optional[pathlib.Path]:
+    import pathlib
+    custom = os.environ.get("STAR_MODEL_PATH")
+    if custom:
+        p = pathlib.Path(custom).resolve()
+        if p.exists():
+            return p
+    root = pathlib.Path(__file__).resolve().parent.parent.parent.parent
+    for candidate in [root / "model" / "star_answer", root / "models" / "star_answer"]:
+        if candidate.exists():
+            return candidate
+    return None
+
 
 @lru_cache(maxsize=1)
 def _get_star_model():
     """Load the fine-tuned STAR DistilBERT classifier (3-output regression)."""
-    import pathlib
-    model_path = pathlib.Path(_STAR_MODEL_PATH).resolve()
-    if not model_path.exists():
-        logger.info("[nlp] STAR model not found at %s — skipping", model_path)
+    model_path = _get_star_path()
+    if not model_path:
+        logger.info("[nlp] STAR model directory (model/star_answer) not found — skipping")
         return None, None
     try:
-        from transformers import AutoTokenizer, AutoModelForSequenceClassification  # type: ignore
+        try:
+            from transformers import AutoTokenizer, AutoModelForSequenceClassification  # type: ignore
+        except (ImportError, AttributeError):
+            from transformers.models.auto.tokenization_auto import AutoTokenizer  # type: ignore
+            from transformers.models.auto.modeling_auto import AutoModelForSequenceClassification  # type: ignore
         import torch  # type: ignore
         logger.info("[nlp] loading STAR classifier from %s", model_path)
         tokenizer = AutoTokenizer.from_pretrained(str(model_path))
         model = AutoModelForSequenceClassification.from_pretrained(str(model_path))
         model.eval()
-        logger.info("[nlp] STAR classifier loaded — outputs: structure, relevance, overall")
+        logger.info("[nlp] STAR classifier loaded successfully — outputs: structure, relevance, overall")
         return tokenizer, model
     except Exception as exc:
         logger.warning("[nlp] STAR classifier load failed: %s", exc)
@@ -73,13 +79,16 @@ def _get_star_model():
 def _get_model():
     """Load MiniLM semantic model (secondary/fallback scorer)."""
     try:
-        from sentence_transformers import SentenceTransformer  # type: ignore
+        import sentence_transformers
+        st_cls = getattr(sentence_transformers, "SentenceTransformer", None)
+        if not callable(st_cls):
+            from sentence_transformers.SentenceTransformer import SentenceTransformer as st_cls
         logger.info("[nlp] loading sentence-transformer model: %s", MODEL_NAME)
-        model = SentenceTransformer(MODEL_NAME)
+        model = st_cls(MODEL_NAME)
         logger.info("[nlp] model loaded successfully")
         return model
-    except ImportError:
-        logger.warning("[nlp] sentence-transformers not installed — falling back to regex NLP")
+    except Exception as exc:
+        logger.warning("[nlp] sentence-transformers unavailable: %s — falling back to regex NLP", exc)
         return None
 
 
@@ -143,6 +152,8 @@ def _star_classify(user_text: str, scenario: str) -> Optional[Tuple[float, float
             max_length=512,
             padding=True,
         )
+        # DistilBERT does not use token_type_ids
+        inputs.pop("token_type_ids", None)
         with torch.no_grad():
             outputs = model(**inputs)
         logits = outputs.logits.squeeze().tolist()

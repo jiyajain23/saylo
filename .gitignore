@@ -52,7 +52,7 @@ Thumbs.db
 *.swo
 
 # Trained model weights (use HuggingFace Hub instead)
-models/
+model/
 *.safetensors
 *.bin
 training_args.bin

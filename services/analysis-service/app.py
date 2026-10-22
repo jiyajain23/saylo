@@ -1,5 +1,18 @@
 import logging
 import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Load .env from analysis-service, backend, or root
+_service_dir = Path(__file__).resolve().parent
+_root_dir = _service_dir.parent.parent
+for env_candidate in [
+    _service_dir / ".env",
+    _root_dir / "backend" / ".env",
+    _root_dir / ".env",
+]:
+    if env_candidate.exists():
+        load_dotenv(env_candidate, override=False)
 
 # pyrefly: ignore [missing-import]
 from fastapi import FastAPI

@@ -70,9 +70,12 @@ _SIM_THRESHOLD = 0.42   # cosine similarity ≥ this = signal present
 @lru_cache(maxsize=1)
 def _get_model():
     try:
-        from sentence_transformers import SentenceTransformer  # type: ignore
+        import sentence_transformers
+        st_cls = getattr(sentence_transformers, "SentenceTransformer", None)
+        if not callable(st_cls):
+            from sentence_transformers.SentenceTransformer import SentenceTransformer as st_cls
         logger.info("[alignment] loading MiniLM model for semantic signal detection")
-        model = SentenceTransformer("all-MiniLM-L6-v2")
+        model = st_cls("all-MiniLM-L6-v2")
         return model
     except Exception as exc:
         logger.warning("[alignment] could not load model: %s", exc)

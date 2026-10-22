@@ -82,19 +82,59 @@ def _build_prompt(
 
 
 def _call_gemini(prompt: str) -> Optional[str]:
-    """Call Gemini Flash via google-generativeai SDK."""
+    """Call Gemini Flash via google-genai (v1) or legacy google-generativeai."""
     key = os.environ.get("GEMINI_API_KEY")
     if not key:
+        logger.warning("[insights] GEMINI_API_KEY not found in environment — skipping AI coach")
         return None
+
+    preferred_model = os.environ.get("GEMINI_INSIGHT_MODEL", "gemini-2.5-flash")
+    candidates = [preferred_model, "gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.0-flash"]
+    seen = set()
+
+    # Priority 1: New official google-genai SDK
     try:
-        import google.generativeai as genai  # type: ignore
-        genai.configure(api_key=key)
-        model = genai.GenerativeModel(
-            model_name=os.environ.get("GEMINI_INSIGHT_MODEL", "gemini-2.0-flash"),
-            generation_config={"temperature": 0.4, "max_output_tokens": 512},
-        )
-        response = model.generate_content(prompt)
-        return response.text
+        from google import genai
+        client = genai.Client(api_key=key)
+        for m_name in candidates:
+            if m_name in seen:
+                continue
+            seen.add(m_name)
+            try:
+                response = client.models.generate_content(
+                    model=m_name,
+                    contents=prompt,
+                )
+                if response and response.text:
+                    logger.info("[insights] generated coaching insights using %s (google-genai)", m_name)
+                    return response.text
+            except Exception as inner_exc:
+                logger.warning("[insights] model %s failed: %s", m_name, inner_exc)
+                continue
+        return None
+    except ImportError:
+        pass
+    except Exception as exc:
+        logger.warning("[insights] google-genai client failed: %s", exc)
+
+    # Priority 2: Fallback to google-generativeai if installed
+    try:
+        import google.generativeai as legacy_genai
+        legacy_genai.configure(api_key=key)
+        for m_name in candidates:
+            try:
+                model = legacy_genai.GenerativeModel(
+                    model_name=m_name,
+                    generation_config={"temperature": 0.4, "max_output_tokens": 512},
+                )
+                response = model.generate_content(prompt)
+                if response and response.text:
+                    logger.info("[insights] generated coaching insights using %s (legacy genai)", m_name)
+                    return response.text
+            except Exception as inner_exc:
+                logger.warning("[insights] legacy model %s failed: %s", m_name, inner_exc)
+                continue
+        return None
     except Exception as exc:
         logger.warning("[insights] Gemini call failed: %s", exc)
         return None

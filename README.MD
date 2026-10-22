@@ -2,69 +2,30 @@
 
 Context-aware mock interview practice with lightweight live nudges + post-session insights.
 
-## What’s implemented
-
-- **Live simulation (Interview)**: Web UI sends your answers over a WebSocket; backend responds with an interviewer follow-up.
-  - Uses **Gemini** if `GEMINI_API_KEY` is set; otherwise uses a safe fallback interviewer.
-- **Context injection**: Optional context text is structured and injected into interviewer prompts + analysis relevance scoring.
-- **Real-time nudges**: Basic filler-word + pace nudges (non-intrusive).
-- **Analysis pipeline**: Python service computes speech metrics, language quality signals, purpose alignment, and a confidence score.
-- **Progress tracking**: Sessions + transcripts + analysis results are persisted in a DB (SQLite for MVP dev; easily upgradable to Postgres).
-
-## Quickstart (Docker)
-
-1) Create `.env` in repo root:
-
-- `GEMINI_API_KEY=` (optional, for better interviewer behavior)
-- `OPENAI_API_KEY=` (optional, not required for MVP)
-
-2) Run:
-
-```bash
-docker compose up --build
 ```
 
-3) Open the API:
+Three terminals, one per service:
 
-- `http://localhost:5000/health`
-
-4) Start the web app (local dev):
-
-```bash
-cd apps/web
-npm install
-npm run dev
-```
-
-Then open `http://localhost:3000`.
-
-## Local dev (no Docker)
-
-- Set `DATABASE_URL=file:./dev.db` (recommended for quickstart on Windows).
-- Start analysis service:
-
+## Terminal 1 — Analysis Service (port 8000)
 ```bash
 cd services/analysis-service
-python -m venv .venv
-.venv\\Scripts\\activate
 pip install -r requirements.txt
-uvicorn app:app --reload --port 8000
+uvicorn app:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-- Start API:
-
+## Terminal 2 — Backend API (port 5000)
 ```bash
-cd apps/api
-npm install
-npx prisma generate
-npx prisma db push
-npm run dev
+cd backend
+pip install -r requirements.txt
+# First time only — create the DB tables:
+python -c "import asyncio; from db import init_db; asyncio.run(init_db())"
+uvicorn main:app --host 0.0.0.0 --port 5000 --reload
 ```
+Make sure [`backend/.env`](file:///c:/Users/jiya%20jain/Documents/GitHub/speakEz-JJ/backend/.env) has your `GEMINI_API_KEY` filled in.
 
-- Start web:
-
+## Terminal 3 — Frontend (port 3000)
 ```bash
-cd apps/web
+cd frontend
 npm install
 npm run dev
 ```
