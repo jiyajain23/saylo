@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import re
+import concurrent.futures
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -31,7 +32,7 @@ You are an expert communication coach analysing a {scenario} practice session.
 - Voice: arousal={arousal:.0%}, dominance={dominance:.0%}, valence={valence:.0%}
 - Emotional tone: dominant={dominant_emotion}
 
-## Transcript Excerpt (last ~400 words of user speech)
+## Transcript Excerpt (last ~200 words of user speech)
 {transcript_excerpt}
 
 ## Your Task
@@ -77,7 +78,7 @@ def _build_prompt(
         dominance=voice.get("dominance", 0.55),
         valence=voice.get("valence", 0.55),
         dominant_emotion=emotion.get("dominant_emotion", "neutral"),
-        transcript_excerpt=transcript_excerpt[:1600],
+        transcript_excerpt=transcript_excerpt[:900],
     )
 
 
@@ -89,12 +90,13 @@ def _call_gemini(prompt: str) -> Optional[str]:
         return None
 
     preferred_model = os.environ.get("GEMINI_INSIGHT_MODEL", "gemini-2.5-flash")
-    candidates = [preferred_model, "gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.0-flash"]
+    candidates = [preferred_model, "gemini-2.5-flash", "gemini-3.8-flash", "gemini-2.5-pro"]
     seen = set()
 
     # Priority 1: New official google-genai SDK
     try:
         from google import genai
+        from google.genai import types as genai_types
         client = genai.Client(api_key=key)
         for m_name in candidates:
             if m_name in seen:
@@ -104,6 +106,11 @@ def _call_gemini(prompt: str) -> Optional[str]:
                 response = client.models.generate_content(
                     model=m_name,
                     contents=prompt,
+                    config=genai_types.GenerateContentConfig(
+                        temperature=0.3,
+                        max_output_tokens=512,
+                        response_mime_type="application/json",
+                    ),
                 )
                 if response and response.text:
                     logger.info("[insights] generated coaching insights using %s (google-genai)", m_name)
@@ -154,7 +161,7 @@ def _parse_json(text: str) -> Optional[Dict[str, Any]]:
                 return json.loads(m.group(0))
             except json.JSONDecodeError:
                 pass
-    logger.warning("[insights] could not parse LLM JSON output")
+    logger.warning("[insights] could not parse LLM JSON output. Raw (first 300 chars): %s", repr(text[:300]))
     return None
 
 
@@ -208,13 +215,22 @@ def generate_insights(
     Generate personalised coaching insights.
     Tries Gemini Flash first; falls back to rule-based if unavailable.
     """
-    # Trim transcript to last ~400 words for the prompt
+    # Trim transcript to last ~200 words for the prompt
     words = user_text.split()
-    excerpt = " ".join(words[-400:]) if len(words) > 400 else user_text
+    excerpt = " ".join(words[-200:]) if len(words) > 200 else user_text
 
     prompt = _build_prompt(scenario, speech, nlp, alignment, voice, emotion, confidence, excerpt)
 
-    raw = _call_gemini(prompt)
+    # Run Gemini call with a 25-second timeout to avoid blocking the pipeline
+    raw: Optional[str] = None
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            fut = pool.submit(_call_gemini, prompt)
+            raw = fut.result(timeout=25)
+    except concurrent.futures.TimeoutError:
+        logger.warning("[insights] Gemini call timed out after 25s — using rule-based fallback")
+    except Exception as exc:
+        logger.warning("[insights] Gemini call raised: %s", exc)
 
     if raw:
         parsed = _parse_json(raw)

@@ -35,7 +35,7 @@ app = FastAPI(title="SpeakEZ Analysis Service", version="0.1.0")
 
 # Request timeout: abort analysis if it runs longer than this (seconds).
 # Protects against model hangs on very large inputs.
-ANALYSIS_TIMEOUT_S = int(os.environ.get("ANALYSIS_TIMEOUT_S", "150"))
+ANALYSIS_TIMEOUT_S = int(os.environ.get("ANALYSIS_TIMEOUT_S", "90"))
 
 # Restrict CORS to known origins. In production set ALLOWED_ORIGINS env var.
 _raw_origins = os.environ.get("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:5000")
@@ -54,3 +54,24 @@ app.include_router(analyze_router)
 @app.on_event("startup")
 async def on_startup() -> None:
     logger.info("Analysis service started. Allowed origins: %s", _origins)
+    # Pre-warm heavy CPU models in background so first real request is fast
+    import asyncio
+    loop = asyncio.get_event_loop()
+    async def _warmup():
+        try:
+            await loop.run_in_executor(None, _load_nlp_models)
+            logger.info("[startup] NLP model warmup complete")
+        except Exception as exc:
+            logger.warning("[startup] model warmup failed (non-fatal): %s", exc)
+    asyncio.create_task(_warmup())
+
+
+def _load_nlp_models() -> None:
+    """Load sentence-transformer and cross-encoder into lru_cache at startup."""
+    try:
+        from modules.nlp import _get_model, _get_cross_encoder
+        _get_model()
+        _get_cross_encoder()
+        logger.info("[warmup] sentence-transformer + cross-encoder loaded")
+    except Exception as exc:
+        logger.warning("[warmup] NLP model load failed: %s", exc)

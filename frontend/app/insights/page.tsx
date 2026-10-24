@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { getSession } from "../../lib/api";
 import Link from "next/link";
 
@@ -11,6 +11,133 @@ const SCENARIO_LABELS: Record<string, string> = {
 };
 
 const DONE_STATUSES = new Set(["READY", "FAILED"]);
+
+// ─── LangGraph Pipeline Visualizer ────────────────────────────────────────────
+
+const PIPELINE_NODES = [
+  { id: "speech",    label: "Speech",    tier: 0 },
+  { id: "nlp",       label: "Language",  tier: 0 },
+  { id: "alignment", label: "Alignment", tier: 0 },
+  { id: "voice",     label: "Voice",     tier: 0 },
+  { id: "emotion",   label: "Emotion",   tier: 0 },
+  { id: "vision",    label: "Vision",    tier: 0 },
+  { id: "aggregator",label: "Aggregate", tier: 1 },
+  { id: "insights",  label: "Insights",  tier: 2 },
+  { id: "jobs",      label: "Jobs",      tier: 3 },
+  { id: "templates", label: "Templates", tier: 4 },
+];
+
+const TIER_COLORS: Record<number, string> = {
+  0: "var(--primary)",
+  1: "var(--violet)",
+  2: "var(--emerald)",
+  3: "#0077b5",
+  4: "var(--amber)",
+};
+
+function AnalysisPipeline() {
+  const [activeIdx, setActiveIdx] = useState(0);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    // Cycle through tiers: 0 (fan-out), then 1-4 sequentially
+    timerRef.current = setInterval(() => {
+      setActiveIdx(prev => (prev + 1) % (PIPELINE_NODES.length + 1));
+    }, 700);
+    return () => { if (timerRef.current) clearInterval(timerRef.current); };
+  }, []);
+
+  // Which tier is currently "active" for the animation
+  const maxActiveTier = activeIdx < 6 ? 0 : activeIdx - 5;
+
+  const tierGroups = [0, 1, 2, 3, 4].map(t =>
+    PIPELINE_NODES.filter(n => n.tier === t)
+  );
+
+  return (
+    <div className="card" style={{ padding: "2rem 2.5rem", display: "flex", flexDirection: "column", gap: "1.5rem" }}>
+      <style>{`
+        @keyframes nodePulse {
+          0%,100% { box-shadow: 0 0 0 0 rgba(99,102,241,0); }
+          50%      { box-shadow: 0 0 0 6px rgba(99,102,241,0.25); }
+        }
+        @keyframes connFlow {
+          0%   { stroke-dashoffset: 20; }
+          100% { stroke-dashoffset: 0; }
+        }
+      `}</style>
+
+      <div style={{ textAlign: "center" }}>
+        <h3 style={{ fontWeight: 700, fontSize: "1.1rem", marginBottom: "0.35rem" }}>Analyzing your performance</h3>
+        <p style={{ color: "var(--text-3)", fontSize: "0.85rem" }}>Running the LangGraph analysis pipeline — insights will appear automatically.</p>
+      </div>
+
+      {/* Pipeline diagram */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "0.5rem", flexWrap: "wrap" }}>
+        {tierGroups.map((nodes, ti) => (
+          <>
+            {/* Connector arrow between tier groups */}
+            {ti > 0 && (
+              <svg key={`arrow-${ti}`} width="28" height="14" viewBox="0 0 28 14" style={{ flexShrink: 0 }}>
+                <line x1="0" y1="7" x2="22" y2="7"
+                  stroke={maxActiveTier >= ti ? TIER_COLORS[ti] : "rgba(255,255,255,0.1)"}
+                  strokeWidth="1.5" strokeDasharray="4 3"
+                  style={{ transition: "stroke 0.4s",
+                    animation: maxActiveTier === ti ? "connFlow 0.6s linear infinite" : "none",
+                    strokeDashoffset: 0
+                  }}
+                />
+                <polygon points="22,3 28,7 22,11"
+                  fill={maxActiveTier >= ti ? TIER_COLORS[ti] : "rgba(255,255,255,0.1)"}
+                  style={{ transition: "fill 0.4s" }}
+                />
+              </svg>
+            )}
+
+            {/* Node group */}
+            <div key={`tier-${ti}`} style={{ display: "flex", flexDirection: "column", gap: "0.5rem", alignItems: "center" }}>
+              {nodes.map(node => {
+                const active = node.tier === 0 ? maxActiveTier === 0 : maxActiveTier === node.tier;
+                const done   = node.tier < maxActiveTier || (node.tier === 0 && maxActiveTier > 0);
+                const color  = TIER_COLORS[node.tier];
+                return (
+                  <div key={node.id} style={{
+                    padding: "0.35rem 0.75rem",
+                    borderRadius: "0.5rem",
+                    fontSize: "0.72rem",
+                    fontWeight: 700,
+                    letterSpacing: "0.04em",
+                    textTransform: "uppercase",
+                    border: `1px solid ${active || done ? color : "rgba(255,255,255,0.08)"}`,
+                    background: active ? `${color}22` : done ? `${color}11` : "transparent",
+                    color: active || done ? color : "var(--text-3)",
+                    transition: "all 0.35s ease",
+                    animation: active ? "nodePulse 1s ease-in-out infinite" : "none",
+                    whiteSpace: "nowrap",
+                  }}>
+                    {done && !active && <span style={{ marginRight: "0.3rem" }}>✓</span>}
+                    {node.label}
+                  </div>
+                );
+              })}
+            </div>
+          </>
+        ))}
+      </div>
+
+      {/* Progress bar */}
+      <div style={{ height: "3px", background: "rgba(255,255,255,0.06)", borderRadius: "2px", overflow: "hidden" }}>
+        <div style={{
+          height: "100%",
+          width: `${Math.round((Math.min(activeIdx, PIPELINE_NODES.length) / PIPELINE_NODES.length) * 100)}%`,
+          background: `linear-gradient(90deg, var(--primary), var(--emerald))`,
+          borderRadius: "2px",
+          transition: "width 0.6s ease",
+        }} />
+      </div>
+    </div>
+  );
+}
 
 function RadialScore({ value, label, size = 120 }: { value: number; label: string; size?: number }) {
   const r = size * 0.4;
@@ -124,13 +251,7 @@ export default function InsightsPage() {
         )}
       </div>
 
-      {data.status === "ANALYZING" && (
-        <div className="card" style={{ textAlign: "center", padding: "2rem" }}>
-          <div className="animate-live" style={{ fontSize: "2rem", marginBottom: "1rem" }}>⚙️</div>
-          <h3 style={{ fontWeight: 700, marginBottom: "0.5rem" }}>Analyzing your performance...</h3>
-          <p style={{ color: "var(--text-3)", fontSize: "0.875rem" }}>This will take about 30-60 seconds. Insights will appear automatically.</p>
-        </div>
-      )}
+      {data.status === "ANALYZING" && <AnalysisPipeline />}
 
       {analysis && (
         <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
@@ -169,24 +290,26 @@ export default function InsightsPage() {
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: "1.5rem" }}>
             <div className="card" style={{ borderLeft: "4px solid var(--emerald)" }}>
               <h3 style={{ fontSize: "1rem", fontWeight: 700, marginBottom: "1rem", display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                <span style={{ fontSize: "1.25rem" }}>🌟</span> Key Strengths
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style={{ flexShrink: 0 }}><path d="M2 8l4 4 8-8" stroke="var(--emerald)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                Key Strengths
               </h3>
               <ul style={{ display: "flex", flexDirection: "column", gap: "0.75rem", padding: 0, listStyle: "none" }}>
                 {(analysis.strengths || []).map((s: string, i: number) => (
                   <li key={i} style={{ fontSize: "0.875rem", color: "var(--text-2)", display: "flex", gap: "0.6rem" }}>
-                    <span style={{ color: "var(--emerald)" }}>✓</span> {s}
+                    <span style={{ color: "var(--emerald)", fontWeight: 700, flexShrink: 0 }}>+</span> {s}
                   </li>
                 ))}
               </ul>
             </div>
             <div className="card" style={{ borderLeft: "4px solid var(--amber)" }}>
               <h3 style={{ fontSize: "1rem", fontWeight: 700, marginBottom: "1rem", display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                <span style={{ fontSize: "1.25rem" }}>🎯</span> Focus Areas
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style={{ flexShrink: 0 }}><circle cx="8" cy="8" r="6" stroke="var(--amber)" strokeWidth="2"/><path d="M8 5v3" stroke="var(--amber)" strokeWidth="2" strokeLinecap="round"/><circle cx="8" cy="11" r="0.5" fill="var(--amber)" stroke="var(--amber)"/></svg>
+                Focus Areas
               </h3>
               <ul style={{ display: "flex", flexDirection: "column", gap: "0.75rem", padding: 0, listStyle: "none" }}>
                 {(analysis.weaknesses || []).map((s: string, i: number) => (
                   <li key={i} style={{ fontSize: "0.875rem", color: "var(--text-2)", display: "flex", gap: "0.6rem" }}>
-                    <span style={{ color: "var(--amber)" }}>!</span> {s}
+                    <span style={{ color: "var(--amber)", fontWeight: 700, flexShrink: 0 }}>–</span> {s}
                   </li>
                 ))}
               </ul>
@@ -201,9 +324,11 @@ export default function InsightsPage() {
                 <div key={i} style={{
                   padding: "0.85rem 1rem", borderRadius: "var(--radius-md)",
                   background: "rgba(255,255,255,0.02)", border: "1px solid var(--border)",
-                  fontSize: "0.875rem", color: "var(--text-2)", lineHeight: 1.5
+                  fontSize: "0.875rem", color: "var(--text-2)", lineHeight: 1.5,
+                  display: "flex", gap: "0.75rem", alignItems: "flex-start"
                 }}>
-                  💡 {s}
+                  <span style={{ color: "var(--primary-lt)", fontWeight: 700, flexShrink: 0, fontSize: "0.75rem", marginTop: "0.1rem" }}>{String(i + 1).padStart(2, "0")}</span>
+                  {s}
                 </div>
               ))}
             </div>
@@ -228,7 +353,8 @@ export default function InsightsPage() {
           {(analysis.jobs || []).length > 0 && (
             <div className="card" style={{ borderTop: "4px solid #0077b5" }}>
               <h3 style={{ fontSize: "1rem", fontWeight: 700, marginBottom: "0.5rem", display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                <span style={{ fontSize: "1.25rem" }}>💼</span> Recommended Jobs
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style={{ flexShrink: 0 }}><rect x="2" y="5" width="12" height="9" rx="1" stroke="#0077b5" strokeWidth="1.5"/><path d="M5 5V4a2 2 0 014 0v1" stroke="#0077b5" strokeWidth="1.5"/></svg>
+                Recommended Jobs
               </h3>
               <p style={{ fontSize: "0.875rem", color: "var(--text-3)", marginBottom: "1.25rem" }}>
                 Based on your interview performance, here are some roles that match your skills.

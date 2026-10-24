@@ -43,26 +43,35 @@ class AnalyzeRequest(BaseModel):
 
 
 @router.post("/analyze")
-def analyze(req: AnalyzeRequest) -> Dict[str, Any]:
+async def analyze(req: AnalyzeRequest) -> Dict[str, Any]:
     """
-    Run the full LangGraph analysis pipeline:
-      speech + NLP (STAR classifier) + alignment (semantic) + voice emotion
+    Run the full LangGraph analysis pipeline asynchronously:
+      speech + NLP (cross-encoder + MiniLM) + alignment (semantic) + voice emotion
       + text emotion + vision → aggregator → Gemini insight agent → job matching
+    Pipeline is offloaded to a thread so the event loop stays responsive.
     """
+    import asyncio
+    import functools
+
     transcript_dicts = [t.model_dump() for t in req.transcript]
 
     user_turns = [t for t in transcript_dicts if t["speaker"] == "user"]
     if not any(t["text"].strip() for t in user_turns):
         raise HTTPException(status_code=422, detail="No user turns found in transcript")
 
+    loop = asyncio.get_event_loop()
     try:
-        state = run_analysis(
-            scenario=req.scenario,
-            context=req.context,
-            transcript=transcript_dicts,
-            audio_b64=req.audio_b64,
-            audio_sample_rate=req.audio_sample_rate,
-            video_frames_b64=req.video_frames_b64,
+        state = await loop.run_in_executor(
+            None,
+            functools.partial(
+                run_analysis,
+                scenario=req.scenario,
+                context=req.context,
+                transcript=transcript_dicts,
+                audio_b64=req.audio_b64,
+                audio_sample_rate=req.audio_sample_rate,
+                video_frames_b64=req.video_frames_b64,
+            )
         )
     except Exception as exc:
         logger.exception("[analyze] pipeline failed")

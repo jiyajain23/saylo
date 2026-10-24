@@ -65,7 +65,9 @@ export default function LiveSessionPage() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [turns, setTurns] = useState<Turn[]>([]);
   const [draft, setDraft] = useState("");
-  const [nudges, setNudges] = useState<{ level: "info" | "warn"; message: string }[]>([]);
+  const [nudges, setNudges] = useState<{ id: number; level: "info" | "warn" | "success"; category: string; message: string; ts: number }[]>([]);
+  const nudgeIdRef = useRef(0);
+  const nudgeCooldownRef = useRef<Record<string, number>>({});  // category → last-fired timestamp
   const [status, setStatus] = useState<"setup" | "live" | "ending">("setup");
   const [isStreamingMic, setIsStreamingMic] = useState(false);
   const [isStreamingVideo, setIsStreamingVideo] = useState(false);
@@ -179,7 +181,7 @@ export default function LiveSessionPage() {
       setIsStreamingMic(true);
     } catch (err) {
       console.error("[mic] failed to start stream", err);
-      setNudges((x) => [{ level: "warn" as const, message: "Could not access microphone." }, ...x].slice(0, 5));
+      setNudges((x) => [{ id: ++nudgeIdRef.current, level: "warn" as const, category: "mic", message: "Could not access microphone.", ts: Date.now() }, ...x].slice(0, 6));
     }
   }
 
@@ -188,6 +190,34 @@ export default function LiveSessionPage() {
     c.processor.disconnect(); c.silentGain.disconnect(); c.source.disconnect();
     c.stream.getTracks().forEach((t) => t.stop()); void c.context.close();
     micCaptureRef.current = null; socketRef.current?.endAudio(); setIsStreamingMic(false);
+  }
+
+  /** Push a nudge with per-category cooldown and auto-expiry. */
+  function pushNudge(level: "info" | "warn" | "success", category: string, message: string, cooldownMs = 8000) {
+    const now = Date.now();
+    const last = nudgeCooldownRef.current[category] ?? 0;
+    if (now - last < cooldownMs) return;  // still cooling down
+    nudgeCooldownRef.current[category] = now;
+    const id = ++nudgeIdRef.current;
+    setNudges(prev => [{ id, level, category, message, ts: now }, ...prev].slice(0, 6));
+    // Auto-remove after 12 s
+    setTimeout(() => setNudges(prev => prev.filter(n => n.id !== id)), 12000);
+  }
+
+  /** Estimate average luma from current canvas frame (0-255). */
+  function estimateLuma(): number {
+    const canvas = canvasRef.current;
+    if (!canvas) return 128;
+    try {
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return 128;
+      const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      let sum = 0;
+      for (let i = 0; i < data.length; i += 16) {  // sample every 4th pixel
+        sum += 0.299 * data[i]! + 0.587 * data[i + 1]! + 0.114 * data[i + 2]!;
+      }
+      return sum / (data.length / 16);
+    } catch { return 128; }
   }
 
   async function captureVideoFrame() {
@@ -199,16 +229,46 @@ export default function LiveSessionPage() {
     ctx.drawImage(video, 0, 0, w, h);
     const [, data] = canvas.toDataURL("image/jpeg", 0.55).split(",");
     if (data) socketRef.current.sendVideoFrame(data, "image/jpeg");
+
+    // ── Lighting check (on canvas, no ML needed) ───────────────────────────
+    const luma = estimateLuma();
+    if (luma < 55) pushNudge("warn", "lighting", "Too dark — move to a brighter spot or turn on a light.");
+    else if (luma > 230) pushNudge("warn", "lighting", "Overexposed — try reducing the light behind you.");
+
     if (isAnalyzingRef.current) return;
     isAnalyzingRef.current = true;
     try {
-      const m = await analyzeVision(); setVisionMetrics(m);
-      const msgs: string[] = [];
-      if (!m.face_present) msgs.push("Move into frame — camera can't detect your face.");
-      if (m.eye_contact < 0.45) msgs.push("Look closer to the camera for stronger eye contact.");
-      if (m.posture === "needs_work") msgs.push("Square your shoulders and sit a bit taller.");
-      if (m.movement > 0.55) msgs.push("Reduce head movement to look steadier.");
-      if (msgs[0]) setNudges((x) => [{ level: "info" as const, message: msgs[0]! }, ...x].slice(0, 5));
+      const m = await analyzeVision();
+      setVisionMetrics(m);
+
+      // ── Face presence ─────────────────────────────────────────────────────
+      if (!m.face_present) {
+        pushNudge("warn", "face", "Move into frame — camera can't detect your face.");
+        return;  // rest of metrics are unreliable without a face
+      }
+
+      // ── Eye contact ───────────────────────────────────────────────────────
+      if (m.eye_contact < 0.30) {
+        pushNudge("warn", "eye", "Look directly at the camera — strong eye contact builds trust.");
+      } else if (m.eye_contact < 0.55) {
+        pushNudge("info", "eye", "Try to keep your gaze closer to the camera lens.");
+      } else if (m.eye_contact > 0.80) {
+        pushNudge("success", "eye", "Great eye contact — keep it up.", 20000);
+      }
+
+      // ── Posture ───────────────────────────────────────────────────────────
+      if (m.posture === "needs_work") {
+        pushNudge("warn", "posture", "Square your shoulders and sit taller — posture signals confidence.");
+      } else if (m.posture === "good") {
+        pushNudge("success", "posture", "Posture looks solid.", 30000);
+      }
+
+      // ── Head movement ─────────────────────────────────────────────────────
+      if (m.movement > 0.65) {
+        pushNudge("warn", "movement", "Reduce head movement — steadiness projects composure.");
+      } else if (m.movement > 0.40) {
+        pushNudge("info", "movement", "Slight head movement detected — stay a bit steadier.");
+      }
     } catch { /* ignore */ } finally { isAnalyzingRef.current = false; }
   }
 
@@ -218,7 +278,7 @@ export default function LiveSessionPage() {
     if (videoRef.current) { videoRef.current.srcObject = stream; await videoRef.current.play(); }
     const frameTimer = setInterval(() => void captureVideoFrame(), 1000);
     videoCaptureRef.current = { stream, frameTimer }; setIsStreamingVideo(true);
-    setNudges((x) => [{ level: "info" as const, message: "Camera on. Keep your face centered and well lit." }, ...x].slice(0, 5));
+    pushNudge("info", "system", "Camera on. Keep your face centred and well lit.", 0);
     void captureVideoFrame();
   }
 
@@ -238,7 +298,7 @@ export default function LiveSessionPage() {
         topicNotes: topicNotes || undefined,
         freeText: (freeText || "") + (purposeMode === "evaluate" ? "\n\nMode: Evaluate — score the user strictly, highlight every weakness explicitly." : "")
       });
-      setSessionId(session.id); setTurns([]); setNudges([]); setStatus("live");
+      setSessionId(session.id); setTurns([]); setNudges([]); nudgeCooldownRef.current = {}; setStatus("live");
       startTimeRef.current = Date.now();
       timerRef.current = setInterval(() => setElapsed(Math.floor((Date.now() - startTimeRef.current) / 1000)), 1000);
       ensureAudioPlayback();
@@ -247,12 +307,15 @@ export default function LiveSessionPage() {
         onAi: (text) => setTurns((t) => [...t, { speaker: "ai", text }]),
         onUserTranscript: (text) => setTurns((t) => [...t, { speaker: "user", text }]),
         onAiAudio: (audio) => playPcmAudio(audio.data, audio.mimeType),
-      onNudge: (n) => setNudges((x) => [n as { level: "info" | "warn"; message: string }, ...x].slice(0, 5)),
-      onError: (msg) => setNudges((x) => [{ level: "warn" as const, message: msg }, ...x].slice(0, 5))
+      onNudge: (n: any) => { const id = ++nudgeIdRef.current; setNudges(x => [{ id, level: n.level ?? "info", category: n.category ?? "system", message: n.message ?? "", ts: Date.now() }, ...x].slice(0, 6)); setTimeout(() => setNudges(p => p.filter(x => x.id !== id)), 12000); },
+      onError: (msg: string) => { const id = ++nudgeIdRef.current; setNudges(x => [{ id, level: "warn" as const, category: "error", message: msg, ts: Date.now() }, ...x].slice(0, 6)); setTimeout(() => setNudges(p => p.filter(x => x.id !== id)), 12000); }
       });
-      socketRef.current = socket; socket.sendUserText(sc.starter);
+    socketRef.current = socket; socket.sendUserText(sc.starter);
+    // Welcome nudge after a short delay
+    setTimeout(() => pushNudge("info", "system", "Session live. Keep your face centred and speak clearly.", 0), 1500);
     } catch (e) {
-      setNudges([{ level: "warn" as const, message: e instanceof Error ? e.message : "Failed to start session." }]);
+      const id = ++nudgeIdRef.current;
+      setNudges([{ id, level: "warn" as const, category: "error", message: e instanceof Error ? e.message : "Failed to start session.", ts: Date.now() }]);
       setStatus("setup");
     }
   }
@@ -488,22 +551,51 @@ export default function LiveSessionPage() {
         </div>
 
         {/* Nudges */}
-        <div className="card" style={{ flex: 1, padding: "1rem", overflow: "hidden" }}>
-          <div style={{ fontSize: "0.78rem", fontWeight: 600, color: "var(--text-2)", marginBottom: "0.6rem" }}>⚡ Live Nudges</div>
-          <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", overflowY: "auto", maxHeight: "100%" }}>
+        <div className="card" style={{ flex: 1, padding: "1rem", overflow: "hidden", display: "flex", flexDirection: "column" }}>
+          <div style={{ fontSize: "0.78rem", fontWeight: 700, color: "var(--text-2)", marginBottom: "0.6rem", display: "flex", alignItems: "center", gap: "0.4rem" }}>
+            <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#f43f5e", display: "inline-block", boxShadow: "0 0 6px #f43f5e" }} />
+            Live Nudges
+          </div>
+          <style>{`
+            @keyframes nudgeIn {
+              from { opacity: 0; transform: translateY(-6px); }
+              to   { opacity: 1; transform: translateY(0); }
+            }
+          `}</style>
+          <div style={{ display: "flex", flexDirection: "column", gap: "0.45rem", overflowY: "auto", flex: 1 }}>
             {nudges.length === 0 && (
-              <div style={{ fontSize: "0.8rem", color: "var(--text-3)" }}>Pace and clarity signals will appear here.</div>
-            )}
-            {nudges.map((n, i) => (
-              <div key={i} className="animate-slide-in" style={{
-                padding: "0.65rem 0.85rem", borderRadius: "var(--radius-md)", fontSize: "0.8rem",
-                background: n.level === "warn" ? "rgba(245,158,11,0.1)" : "rgba(255,255,255,0.03)",
-                border: `1px solid ${n.level === "warn" ? "rgba(245,158,11,0.25)" : "var(--border)"}`,
-                color: n.level === "warn" ? "#fcd34d" : "var(--text-2)"
-              }}>
-                {n.level === "warn" ? "⚠ " : "💡 "}{n.message}
+              <div style={{ fontSize: "0.78rem", color: "var(--text-3)", lineHeight: 1.5 }}>
+                Vision signals and coaching cues will appear here as you speak.
               </div>
-            ))}
+            )}
+            {nudges.map((n) => {
+              const isWarn = n.level === "warn";
+              const isSuccess = n.level === "success";
+              const ICON: Record<string, string> = {
+                face: "◉", eye: "◎", posture: "▲", movement: "≋", lighting: "☀", mic: "⊘", error: "!", system: "→"
+              };
+              const color = isWarn ? "#fbbf24" : isSuccess ? "#34d399" : "var(--primary-lt)";
+              const bg = isWarn ? "rgba(251,191,36,0.08)" : isSuccess ? "rgba(52,211,153,0.08)" : "rgba(255,255,255,0.025)";
+              const border = isWarn ? "rgba(251,191,36,0.22)" : isSuccess ? "rgba(52,211,153,0.2)" : "var(--border)";
+              return (
+                <div key={n.id} style={{
+                  padding: "0.55rem 0.75rem", borderRadius: "var(--radius-md)",
+                  fontSize: "0.78rem", lineHeight: 1.5,
+                  background: bg, border: `1px solid ${border}`, color: "var(--text-2)",
+                  display: "flex", gap: "0.55rem", alignItems: "flex-start",
+                  animation: "nudgeIn 0.25s ease",
+                }}>
+                  <span style={{ color, fontWeight: 800, fontSize: "0.7rem", flexShrink: 0, marginTop: "0.1rem", fontVariantNumeric: "tabular-nums" }}>
+                    {ICON[n.category] ?? "·"}
+                  </span>
+                  <span>{n.message}</span>
+                  <button onClick={() => setNudges(p => p.filter(x => x.id !== n.id))}
+                    style={{ marginLeft: "auto", background: "none", border: "none", cursor: "pointer",
+                      color: "var(--text-3)", fontSize: "0.7rem", padding: "0 0.2rem", flexShrink: 0, lineHeight: 1 }}
+                    title="Dismiss">✕</button>
+                </div>
+              );
+            })}
           </div>
         </div>
       </div>

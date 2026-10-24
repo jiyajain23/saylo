@@ -1,12 +1,11 @@
 """
-Semantic NLP Module — uses the fine-tuned STAR DistilBERT classifier as the
-primary structure/relevance scorer, with sentence-transformer similarity as
-a secondary method and regex as a final fallback.
+Semantic NLP Module — layered scoring pipeline.
 
 Model priority:
-  1. Fine-tuned STAR classifier (models/star_answer/) — trained on real interview data
-  2. Sentence-transformer semantic similarity against adaptive templates
-  3. Regex pattern matching (legacy fallback)
+  1. Fine-tuned STAR classifier (model/star_answer/) — trained on real interview data
+  2. Cross-Encoder relevance scoring (cross-encoder/ms-marco-MiniLM-L-6-v2)
+  3. Sentence-transformer semantic similarity (all-MiniLM-L6-v2) — structure + relevance
+  4. Regex pattern matching — deterministic fallback
 """
 
 from __future__ import annotations
@@ -18,6 +17,7 @@ from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+import concurrent.futures
 
 from modules.template_store import get_templates
 
@@ -75,9 +75,29 @@ def _get_star_model():
         return None, None
 
 
+CROSS_ENCODER_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+
+
+@lru_cache(maxsize=1)
+def _get_cross_encoder():
+    """Load the Cross-Encoder relevance model (Priority 2 scorer)."""
+    try:
+        try:
+            from sentence_transformers import CrossEncoder  # type: ignore
+        except (ImportError, AttributeError):
+            from sentence_transformers.cross_encoder import CrossEncoder  # type: ignore
+        logger.info("[nlp] loading cross-encoder: %s", CROSS_ENCODER_NAME)
+        model = CrossEncoder(CROSS_ENCODER_NAME, max_length=512)
+        logger.info("[nlp] cross-encoder loaded successfully")
+        return model
+    except Exception as exc:
+        logger.warning("[nlp] cross-encoder unavailable: %s — will fall back to sentence-transformer", exc)
+        return None
+
+
 @lru_cache(maxsize=1)
 def _get_model():
-    """Load MiniLM semantic model (secondary/fallback scorer)."""
+    """Load MiniLM semantic model (Priority 3 structure scorer)."""
     try:
         import sentence_transformers
         st_cls = getattr(sentence_transformers, "SentenceTransformer", None)
@@ -165,6 +185,50 @@ def _star_classify(user_text: str, scenario: str) -> Optional[Tuple[float, float
         return structure, relevance
     except Exception as exc:
         logger.warning("[nlp] STAR classifier inference failed: %s", exc)
+        return None
+
+
+def _cross_encoder_relevance(user_text: str, context: Dict[str, Any]) -> Optional[float]:
+    """
+    Use a pre-trained Cross-Encoder (ms-marco-MiniLM-L-6-v2) to score how relevant
+    the user's answer is to the session context.
+
+    The cross-encoder jointly encodes [query | passage] and outputs a raw logit;
+    we sigmoid it and map to [0.45, 0.95].
+    Returns None if the model is unavailable.
+    """
+    model = _get_cross_encoder()
+    if model is None:
+        return None
+
+    # Build a compact query from context fields
+    ctx_parts: List[str] = []
+    for key in ["role", "company", "objective", "audience", "jobDescription", "topicNotes"]:
+        val = context.get(key)
+        if isinstance(val, str) and val.strip():
+            ctx_parts.append(val.strip())
+    for key in ["skills", "focusAreas", "candidateBackground"]:
+        val = context.get(key)
+        if isinstance(val, list):
+            ctx_parts.extend(str(v) for v in val if isinstance(v, str))
+
+    if not ctx_parts:
+        return None  # No context — skip; let downstream scorer handle it
+
+    query = " | ".join(ctx_parts)[:800]
+    passage = user_text[:800]
+
+    try:
+        import math
+        raw_score: float = float(model.predict([(query, passage)])[0])
+        # Sigmoid maps unbounded logit → (0, 1)
+        sigmoid = 1.0 / (1.0 + math.exp(-raw_score))
+        # Scale to [0.45, 0.95] — gives comfortable operating range
+        relevance = round(min(0.95, max(0.45, 0.45 + sigmoid * 0.50)), 3)
+        logger.info("[nlp] cross-encoder raw=%.3f sigmoid=%.3f relevance=%.3f", raw_score, sigmoid, relevance)
+        return relevance
+    except Exception as exc:
+        logger.warning("[nlp] cross-encoder inference failed: %s", exc)
         return None
 
 
@@ -263,24 +327,42 @@ def analyze_language(text: str, context: Dict[str, Any], scenario: str = "INTERV
     clarity = round(max(0.45, min(clarity, 0.95)), 3)
 
     # ── Semantic scoring (structure + relevance) ───────────────────────────────
+    # Truncate early — models only benefit from ~120 tokens; extra chars just slow encoding
+    model_text = text[:600]
+
     # Priority 1: Fine-tuned STAR classifier
-    star_result = _star_classify(text[:1000], scenario)
+    star_result = _star_classify(model_text, scenario)
 
     if star_result is not None:
         structure, relevance = star_result
         method = "star_classifier"
     else:
-        # Priority 2: MiniLM sentence-transformer
-        model = _get_model()
-        if model is not None:
-            structure = _semantic_structure(model, text, scenario)
-            relevance = _semantic_relevance(model, text, context)
-            method = "semantic"
+        # Priority 2 + 3: Run cross-encoder and sentence-transformer in parallel
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            ce_fut = pool.submit(_cross_encoder_relevance, model_text, context)
+            st_fut = pool.submit(_get_model)  # cached after first call — near-instant
+
+        ce_relevance = ce_fut.result()
+        st_model = st_fut.result()
+
+        if st_model is not None:
+            structure = _semantic_structure(st_model, model_text, scenario)
+            if ce_relevance is not None:
+                relevance = ce_relevance  # cross-encoder wins for relevance
+                method = "cross_encoder+semantic"
+            else:
+                relevance = _semantic_relevance(st_model, model_text, context)
+                method = "semantic"
         else:
-            # Priority 3: Regex fallback
-            structure = _regex_fallback_structure(text, scenario)
-            relevance = _regex_fallback_relevance(text, context)
-            method = "regex_fallback"
+            if ce_relevance is not None:
+                structure = _regex_fallback_structure(model_text, scenario)
+                relevance = ce_relevance
+                method = "cross_encoder+regex"
+            else:
+                # Priority 4: Regex fallback
+                structure = _regex_fallback_structure(model_text, scenario)
+                relevance = _regex_fallback_relevance(model_text, context)
+                method = "regex_fallback"
 
     logger.info("[nlp] scoring method=%s structure=%.3f relevance=%.3f clarity=%.3f",
                 method, structure, relevance, clarity)
