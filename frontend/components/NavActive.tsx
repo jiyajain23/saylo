@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import React from "react";
 
 export function NavActive({
   href,
@@ -11,7 +12,7 @@ export function NavActive({
 }: {
   href: string;
   label: string;
-  icon: string;
+  icon?: React.ReactNode;
   exact?: boolean;
 }) {
   const pathname = usePathname();
@@ -21,10 +22,12 @@ export function NavActive({
     <Link
       href={href}
       className={`nav-link${isActive ? " active" : ""}`}
+      aria-current={isActive ? "page" : undefined}
       style={{ textDecoration: "none" }}
     >
-      <span style={{ fontSize: "1rem", lineHeight: 1 }}>{icon}</span>
+      {icon && <span aria-hidden="true" className="nav-icon" style={{ display: "inline-flex", alignItems: "center" }}>{icon}</span>}
       <span>{label}</span>
     </Link>
   );
 }
+

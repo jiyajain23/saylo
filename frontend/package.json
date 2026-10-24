@@ -1,5 +1,5 @@
 {
-  "name": "@speakez-JJ/frontend",
+  "name": "@saylo/frontend",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -7,18 +7,20 @@
     "dev": "next dev -p 3000",
     "build": "next build",
     "start": "next start -p 3000",
-    "lint": "next lint"
+    "lint": "eslint ."
   },
   "dependencies": {
     "@clerk/nextjs": "^7.3.0",
     "@clerk/themes": "^2.4.57",
     "@mediapipe/tasks-vision": "^0.10.22-rc.20250304",
+    "lucide-react": "^1.61.0",
     "next": "^15.3.2",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "zod": "^3.25.28"
   },
   "devDependencies": {
+    "@eslint/eslintrc": "^3.3.7",
     "@tailwindcss/postcss": "^4.1.7",
     "@types/node": "^22.15.29",
     "@types/react": "^19.1.5",

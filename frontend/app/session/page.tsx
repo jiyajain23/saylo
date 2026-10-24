@@ -4,6 +4,26 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createSession, endSession, type Scenario } from "../../lib/api";
 import { openLiveSocket } from "../../lib/socket";
 import { useVisionMetrics, type VisionMetrics } from "../../hooks/useVisionMetrics";
+import {
+  Mic,
+  Square,
+  Video,
+  VideoOff,
+  Send,
+  X,
+  Smile,
+  Eye,
+  Activity,
+  Move,
+  Sun,
+  MicOff,
+  AlertCircle,
+  ArrowRight,
+  CheckCircle2,
+  Briefcase,
+  Presentation,
+  Users
+} from "lucide-react";
 
 type Turn = { speaker: "user" | "ai"; text: string };
 type AudioPlayback = { context: AudioContext; nextTime: number };
@@ -11,10 +31,10 @@ type MicCapture = { stream: MediaStream; context: AudioContext; source: MediaStr
 type VideoCapture = { stream: MediaStream; frameTimer: ReturnType<typeof setInterval> };
 type PurposeMode = "practice" | "evaluate";
 
-const SCENARIOS: { id: Scenario; label: string; icon: string; desc: string; contextLabel: string; starter: string }[] = [
-  { id: "INTERVIEW", label: "Interview",  icon: "💼", desc: "Adaptive mock interview with follow-up questions",  contextLabel: "Resume + job description", starter: "Hi, I'm ready for the interview." },
-  { id: "PITCH",     label: "Pitch",      icon: "📊", desc: "Pitch practice with critical investor-style probing", contextLabel: "Pitch topic + audience notes", starter: "Hi, I'm ready to practice my pitch." },
-  { id: "MEETING",   label: "Meeting",    icon: "🤝", desc: "Meeting simulation with stakeholder dynamics",      contextLabel: "Meeting goal + stakeholder notes", starter: "Hi, I'm ready for the meeting simulation." }
+const SCENARIOS: { id: Scenario; label: string; desc: string; contextLabel: string; starter: string; icon: React.ReactNode }[] = [
+  { id: "INTERVIEW", label: "Interview", desc: "Adaptive mock interview with follow-up questions", contextLabel: "Resume + job description", starter: "Hi, I'm ready for the interview.", icon: <Briefcase size={20} /> },
+  { id: "PITCH", label: "Pitch", desc: "Pitch practice with critical investor-style probing", contextLabel: "Pitch topic + audience notes", starter: "Hi, I'm ready to practice my pitch.", icon: <Presentation size={20} /> },
+  { id: "MEETING", label: "Meeting", desc: "Meeting simulation with stakeholder dynamics", contextLabel: "Meeting goal + stakeholder notes", starter: "Hi, I'm ready for the meeting simulation.", icon: <Users size={20} /> }
 ];
 
 const PERSONAS = [
@@ -33,21 +53,21 @@ const PRESSURE_LEVELS = [
   { level: 3, label: "High" }
 ];
 
-function ArcGauge({ value, label, color = "#6366f1" }: { value: number; label: string; color?: string }) {
+function ArcGauge({ value, label, color = "#296e91" }: { value: number; label: string; color?: string }) {
   const r = 22, circ = Math.PI * r;
   const fill = circ * (1 - Math.min(value, 1));
   return (
     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "0.25rem" }}>
-      <svg width="56" height="34" viewBox="0 0 56 34">
-        <path d="M6,30 A22,22 0 0,1 50,30" fill="none" stroke="rgba(255,255,255,0.07)" strokeWidth="5" strokeLinecap="round" />
+      <svg className="chart" role="img" aria-label={`${label}: ${Math.round(value * 100)}%`} width="56" height="34" viewBox="0 0 56 34">
+        <path d="M6,30 A22,22 0 0,1 50,30" fill="none" stroke="#dce8ec" strokeWidth="5" strokeLinecap="round" />
         <path d="M6,30 A22,22 0 0,1 50,30" fill="none" stroke={color}
           strokeWidth="5" strokeLinecap="round"
           strokeDasharray={`${circ}`} strokeDashoffset={fill} />
-        <text x="28" y="30" textAnchor="middle" fontSize="10" fontWeight="700" fill="#e2e8f0">
+        <text x="28" y="30" textAnchor="middle" fontSize="10" fontWeight="700" fill="#28495a">
           {Math.round(value * 100)}%
         </text>
       </svg>
-      <span style={{ fontSize: "0.65rem", color: "var(--text-3)" }}>{label}</span>
+      <span style={{ fontSize: "0.8125rem", color: "var(--text-3)" }}>{label}</span>
     </div>
   );
 }
@@ -332,7 +352,7 @@ export default function LiveSessionPage() {
     if (timerRef.current) clearInterval(timerRef.current);
     try { await endSession(sessionId); window.location.href = `/insights?sessionId=${encodeURIComponent(sessionId)}`; }
     catch (e) {
-      setNudges((x) => [{ level: "warn" as const, message: e instanceof Error ? e.message : "Failed to end session." }, ...x].slice(0, 5));
+      setNudges((x) => [{ id: ++nudgeIdRef.current, level: "warn" as const, category: "error", message: e instanceof Error ? e.message : "Failed to end session.", ts: Date.now() }, ...x].slice(0, 5));
       setStatus("live");
     }
   }
@@ -342,61 +362,60 @@ export default function LiveSessionPage() {
 
   // ── Setup screen ──────────────────────────────────────────────────────────
   if (status === "setup") return (
-    <div className="animate-fade-in" style={{ display: "flex", flexDirection: "column", gap: "1.75rem" }}>
-      <div>
-        <h1 style={{ fontSize: "1.6rem", fontWeight: 800, margin: 0 }}>🎙 Live Session</h1>
-        <p style={{ color: "var(--text-2)", marginTop: "0.35rem", fontSize: "0.9rem" }}>
+    <div className="animate-fade-in" style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
+      <div className="page-heading">
+        <h1>Live Session</h1>
+        <p style={{ color: "var(--text-2)", marginTop: "0.35rem", fontSize: "0.9375rem" }}>
           Choose your scenario, set your context, then practice with live AI coaching.
         </p>
       </div>
 
       {/* Scenario tabs */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "0.75rem" }}>
+      <div className="scenario-grid" role="group" aria-label="Practice scenario">
         {SCENARIOS.map((s) => (
-          <button key={s.id} onClick={() => chooseScenario(s.id)} style={{
-            background: scenario === s.id ? "rgba(99,102,241,0.12)" : "var(--card)",
-            border: `1px solid ${scenario === s.id ? "rgba(99,102,241,0.35)" : "var(--border)"}`,
+          <button key={s.id} className="choice-button" aria-pressed={scenario === s.id} onClick={() => chooseScenario(s.id)} style={{
+            background: scenario === s.id ? "rgba(41,110,145,0.12)" : "rgba(255,255,255,0.8)",
+            border: `1.5px solid ${scenario === s.id ? "var(--accent)" : "var(--border)"}`,
             borderRadius: "var(--radius-lg)", padding: "1.1rem", cursor: "pointer",
-            color: "inherit", textAlign: "left", transition: "all 0.15s"
+            color: "inherit", textAlign: "left", transition: "all 0.15s ease",
+            display: "flex", flexDirection: "column", gap: "0.35rem"
           }}>
-            <div style={{ fontSize: "1.5rem" }}>{s.icon}</div>
-            <div style={{ fontWeight: 700, fontSize: "0.95rem", marginTop: "0.4rem", color: scenario === s.id ? "#a5b4fc" : "var(--text-1)" }}>{s.label}</div>
-            <div style={{ fontSize: "0.75rem", color: "var(--text-3)", marginTop: "0.2rem" }}>{s.desc}</div>
+            <div style={{ color: scenario === s.id ? "var(--accent)" : "var(--muted)" }}>{s.icon}</div>
+            <div style={{ fontWeight: 700, fontSize: "0.9375rem", marginTop: "0.2rem", color: scenario === s.id ? "#154f67" : "var(--text-1)" }}>{s.label}</div>
+            <div style={{ fontSize: "0.8125rem", color: "var(--text-3)", lineHeight: 1.4 }}>{s.desc}</div>
           </button>
         ))}
       </div>
 
       {/* Purpose mode */}
       <div className="card">
-        <div style={{ fontSize: "0.82rem", fontWeight: 600, color: "var(--text-2)", marginBottom: "0.75rem" }}>Purpose Mode</div>
-        <div style={{ display: "flex", gap: "0.5rem" }}>
+        <div style={{ fontSize: "0.875rem", fontWeight: 700, color: "var(--text-1)", marginBottom: "0.6rem" }}>Purpose Mode</div>
+        <div className="selection-row" role="group" aria-label="Purpose mode">
           {(["practice", "evaluate"] as PurposeMode[]).map((m) => (
-            <button key={m} onClick={() => setPurposeMode(m)} style={{
-              padding: "0.45rem 1rem", borderRadius: "var(--radius-md)", cursor: "pointer",
-              fontFamily: "inherit", fontSize: "0.85rem", fontWeight: 500, border: "none",
-              background: purposeMode === m ? "var(--primary)" : "rgba(255,255,255,0.05)",
-              color: purposeMode === m ? "#fff" : "var(--text-2)",
-              boxShadow: purposeMode === m ? "0 0 20px rgba(99,102,241,0.35)" : "none",
-              transition: "all 0.15s"
+            <button key={m} className="choice-button" aria-pressed={purposeMode === m} onClick={() => setPurposeMode(m)} style={{
+              padding: "0.4rem 1rem", borderRadius: "var(--radius-md)", cursor: "pointer",
+              fontSize: "0.875rem", fontWeight: 600, border: "none",
+              textTransform: "capitalize",
+              transition: "all 0.15s ease"
             }}>
-              {m === "practice" ? "🏋 Practice" : "📐 Evaluate"}
+              {m}
             </button>
           ))}
         </div>
-        <p style={{ fontSize: "0.78rem", color: "var(--text-3)", marginTop: "0.5rem", margin: "0.5rem 0 0" }}>
+        <p style={{ fontSize: "0.8125rem", color: "var(--text-3)", marginTop: "0.5rem" }}>
           {purposeMode === "practice" ? "AI guides you with hints and encouragement." : "AI scores strictly and highlights every weakness explicitly."}
         </p>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem" }}>
+      <div className="two-column">
         {/* Persona */}
         <div className="card">
-          <div style={{ fontSize: "0.82rem", fontWeight: 600, color: "var(--text-2)", marginBottom: "0.75rem" }}>AI Persona</div>
-          <select 
-            value={persona} 
+          <label htmlFor="persona" style={{ display: "block", marginBottom: "0.4rem", fontSize: "0.875rem", fontWeight: 700 }}>AI Persona</label>
+          <select id="persona"
+            value={persona}
             onChange={(e) => setPersona(e.target.value)}
-            className="input" 
-            style={{ width: "100%", cursor: "pointer", padding: "0.5rem" }}
+            className="input"
+            style={{ width: "100%", cursor: "pointer" }}
           >
             {PERSONAS.map(p => (
               <option key={p.id} value={p.id}>{p.label} - {p.desc}</option>
@@ -406,22 +425,22 @@ export default function LiveSessionPage() {
 
         {/* Pressure Mode */}
         <div className="card">
-          <div style={{ fontSize: "0.82rem", fontWeight: 600, color: "var(--text-2)", marginBottom: "0.75rem" }}>Pressure Level</div>
-          <div style={{ display: "flex", gap: "0.25rem" }}>
+          <div style={{ fontSize: "0.875rem", fontWeight: 700, color: "var(--text-1)", marginBottom: "0.6rem" }}>Pressure Level</div>
+          <div className="selection-row" role="group" aria-label="Pressure level">
             {PRESSURE_LEVELS.map((p) => {
               const colors = ["#ffd63382", "#fb923c77", "#ff734d7d", "#fc060676"];
               const activeColor = colors[p.level];
               const isActive = pressureLevel === p.level;
-              
+
               return (
-                <button key={p.level} onClick={() => setPressureLevel(p.level)} style={{
-                  flex: 1, padding: "0.45rem 0", borderRadius: "var(--radius-md)", cursor: "pointer",
-                  fontFamily: "inherit", fontSize: "0.85rem", fontWeight: 600, border: "none",
-                  background: isActive ? activeColor : "rgba(255,255,255,0.05)",
+                <button key={p.level} className="choice-button" aria-pressed={pressureLevel === p.level} onClick={() => setPressureLevel(p.level)} style={{
+                  flex: 1, padding: "0.4rem 0", borderRadius: "var(--radius-md)", cursor: "pointer",
+                  fontSize: "0.8125rem", fontWeight: 600, border: "none",
+                  background: isActive ? activeColor : "rgba(255,255,255,0.7)",
                   color: isActive ? "#000" : "var(--text-2)",
-                  boxShadow: isActive ? `0 0 15px ${activeColor}44` : "none",
-                  transition: "all 0.15s",
-                  opacity: isActive ? 1 : 0.7
+                  boxShadow: isActive ? `0 0 12px ${activeColor}44` : "none",
+                  transition: "all 0.15s ease",
+                  opacity: isActive ? 1 : 0.8
                 }}>
                   {p.label}
                 </button>
@@ -431,34 +450,36 @@ export default function LiveSessionPage() {
         </div>
       </div>
 
+      {nudges.length > 0 && <div className="state-message error-message" role="alert">{nudges.map(n => <p key={n.id}>{n.message}</p>)}</div>}
       {/* Context form */}
-      <div className="card" style={{ display: "flex", flexDirection: "column", gap: "1.1rem" }}>
-        <div style={{ fontSize: "0.82rem", fontWeight: 600, color: "var(--text-2)" }}>Session Context ({sc.contextLabel})</div>
+      <div className="card" style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+        <div style={{ fontSize: "0.9375rem", fontWeight: 700, color: "var(--ink)" }}>Session Context ({sc.contextLabel})</div>
         <div>
-          <label style={{ fontSize: "0.82rem", color: "var(--text-3)", display: "block", marginBottom: "0.35rem" }}>Session title</label>
-          <input value={title} onChange={(e) => setTitle(e.target.value)} className="input" />
+          <label htmlFor="title" style={{ fontSize: "0.8125rem", color: "var(--text-3)", display: "block", marginBottom: "0.3rem" }}>Session title</label>
+          <input id="title" value={title} onChange={(e) => setTitle(e.target.value)} className="input" />
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem" }}>
+        <div className="two-column">
           <div>
-            <label style={{ fontSize: "0.82rem", color: "var(--text-3)", display: "block", marginBottom: "0.35rem" }}>Resume / background</label>
-            <textarea value={resumeText} onChange={(e) => setResumeText(e.target.value)} rows={5} placeholder="Experience, skills, projects..." className="input" />
+            <label htmlFor="resumeText" style={{ fontSize: "0.8125rem", color: "var(--text-3)", display: "block", marginBottom: "0.3rem" }}>Resume / background</label>
+            <textarea id="resumeText" value={resumeText} onChange={(e) => setResumeText(e.target.value)} rows={4} placeholder="Experience, skills, projects..." className="input" />
           </div>
           <div>
-            <label style={{ fontSize: "0.82rem", color: "var(--text-3)", display: "block", marginBottom: "0.35rem" }}>Role / audience / topic</label>
-            <textarea value={jobDescription} onChange={(e) => setJobDescription(e.target.value)} rows={5} placeholder="Job description, pitch audience, stakeholders..." className="input" />
+            <label htmlFor="jobDescription" style={{ fontSize: "0.8125rem", color: "var(--text-3)", display: "block", marginBottom: "0.3rem" }}>Role / audience / topic</label>
+            <textarea id="jobDescription" value={jobDescription} onChange={(e) => setJobDescription(e.target.value)} rows={4} placeholder="Job description, pitch audience, stakeholders..." className="input" />
           </div>
           <div>
-            <label style={{ fontSize: "0.82rem", color: "var(--text-3)", display: "block", marginBottom: "0.35rem" }}>Topic notes</label>
-            <textarea value={topicNotes} onChange={(e) => setTopicNotes(e.target.value)} rows={4} placeholder="Agenda, key points..." className="input" />
+            <label htmlFor="topicNotes" style={{ fontSize: "0.8125rem", color: "var(--text-3)", display: "block", marginBottom: "0.3rem" }}>Topic notes</label>
+            <textarea id="topicNotes" value={topicNotes} onChange={(e) => setTopicNotes(e.target.value)} rows={3} placeholder="Agenda, key points..." className="input" />
           </div>
           <div>
-            <label style={{ fontSize: "0.82rem", color: "var(--text-3)", display: "block", marginBottom: "0.35rem" }}>Extra instructions</label>
-            <textarea value={freeText} onChange={(e) => setFreeText(e.target.value)} rows={4} placeholder="Anything extra for the AI to know..." className="input" />
+            <label htmlFor="freeText" style={{ fontSize: "0.8125rem", color: "var(--text-3)", display: "block", marginBottom: "0.3rem" }}>Extra instructions</label>
+            <textarea id="freeText" value={freeText} onChange={(e) => setFreeText(e.target.value)} rows={3} placeholder="Anything extra for the AI to know..." className="input" />
           </div>
         </div>
         <div>
-          <button onClick={start} className="btn btn-primary" style={{ fontSize: "0.95rem", padding: "0.65rem 1.5rem" }}>
-            {sc.icon} Start {sc.label}
+          <button onClick={start} className="btn btn-primary" style={{ padding: "0.6rem 1.4rem" }}>
+            <span>Start {sc.label} Practice</span>
+            <ArrowRight size={14} />
           </button>
         </div>
       </div>
@@ -467,61 +488,65 @@ export default function LiveSessionPage() {
 
   // ── Live screen ──────────────────────────────────────────────────────────
   return (
-    <div className="animate-fade-in" style={{ display: "grid", gridTemplateColumns: "1fr 300px", gap: "1.25rem", height: "calc(100vh - 5rem)", maxHeight: "800px" }}>
+    <div className="live-workspace">
       {/* Chat panel */}
-      <div className="card" style={{ display: "flex", flexDirection: "column", padding: "1.25rem" }}>
+      <div className="card live-chat" style={{ display: "flex", flexDirection: "column", padding: "1.25rem" }}>
         {/* Header */}
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "1rem", flexShrink: 0 }}>
+        <div className="live-header" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "1rem", flexShrink: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
             <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
-              <span className="animate-live" style={{ width: "8px", height: "8px", borderRadius: "50%", background: "#f43f5e", display: "inline-block" }} />
-              <span style={{ fontSize: "0.72rem", fontWeight: 700, color: "#fda4af", letterSpacing: "0.08em" }}>LIVE</span>
+              <span className="animate-live" style={{ width: "8px", height: "8px", borderRadius: "50%", background: "#9a2540", display: "inline-block" }} />
+              <span style={{ fontSize: "0.8125rem", fontWeight: 700, color: "#9a2540", letterSpacing: "0.08em" }}>LIVE</span>
             </div>
             <div>
               <div style={{ fontWeight: 700, fontSize: "0.95rem" }}>{title}</div>
-              <div style={{ fontSize: "0.72rem", color: "var(--text-3)" }}>{sc.label} · {purposeMode}</div>
+              <div style={{ fontSize: "0.8125rem", color: "var(--text-3)" }}>{sc.label} · {purposeMode}</div>
             </div>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
-            <span style={{ fontSize: "0.85rem", fontWeight: 600, color: "var(--text-2)", fontVariantNumeric: "tabular-nums" }}>{fmtTime(elapsed)}</span>
-            <button onClick={finish} disabled={status === "ending"} className="btn btn-danger" style={{ fontSize: "0.8rem", padding: "0.4rem 0.85rem" }}>
-              {status === "ending" ? "Ending…" : "End & Analyze"}
+            <span style={{ fontSize: "0.9375rem", fontWeight: 700, color: "var(--ink)", fontVariantNumeric: "tabular-nums" }}>{fmtTime(elapsed)}</span>
+            <button onClick={finish} disabled={status === "ending"} className="btn btn-danger" style={{ padding: "0.35rem 0.85rem", fontSize: "0.8125rem" }}>
+              <CheckCircle2 size={14} />
+              <span>{status === "ending" ? "Ending…" : "End & Analyze"}</span>
             </button>
           </div>
         </div>
 
         {/* Messages */}
-        <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: "0.75rem", paddingRight: "0.25rem" }}>
+        <div className="transcript" role="log" aria-label="Live transcript" aria-live="polite" tabIndex={0} style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: "0.75rem", paddingRight: "0.25rem" }}>
           {turns.length === 0 && (
-            <div style={{ textAlign: "center", padding: "2rem 0", color: "var(--text-3)", fontSize: "0.875rem" }}>
-              <div style={{ fontSize: "2rem", marginBottom: "0.5rem" }}>⏳</div>
+            <div style={{ textAlign: "center", padding: "2.5rem 0", color: "var(--text-3)", fontSize: "0.875rem" }}>
               Connecting to AI coach…
             </div>
           )}
           {turns.map((t, i) => (
             <div key={i} className={`animate-slide-up ${t.speaker === "user" ? "bubble-user" : "bubble-ai"}`}
-              style={{ maxWidth: "88%", padding: "0.75rem 1rem", alignSelf: t.speaker === "user" ? "flex-end" : "flex-start" }}>
-              <div style={{ fontSize: "0.68rem", color: "var(--text-3)", marginBottom: "0.3rem", fontWeight: 600 }}>
-                {t.speaker === "ai" ? "🤖 Coach" : "👤 You"}
+              style={{ maxWidth: "85%", padding: "0.75rem 1rem", alignSelf: t.speaker === "user" ? "flex-end" : "flex-start" }}>
+              <div style={{ fontSize: "0.75rem", color: "var(--text-3)", marginBottom: "0.25rem", fontWeight: 700, textTransform: "uppercase" }}>
+                {t.speaker === "ai" ? "Coach" : "You"}
               </div>
-              <div style={{ fontSize: "0.875rem", lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{t.text}</div>
+              <div style={{ fontSize: "0.9375rem", lineHeight: 1.55, whiteSpace: "pre-wrap" }}>{t.text}</div>
             </div>
           ))}
         </div>
 
         {/* Input */}
-        <div style={{ display: "flex", gap: "0.5rem", marginTop: "1rem", flexShrink: 0 }}>
-          <input value={draft} onChange={(e) => setDraft(e.target.value)}
+        <label htmlFor="response-draft" style={{ fontSize: "0.8125rem", fontWeight: 600, marginTop: "0.5rem", display: "block" }}>Your response</label>
+        <div className="composer" style={{ display: "flex", gap: "0.5rem", marginTop: "0.35rem", flexShrink: 0 }}>
+          <input id="response-draft" value={draft} onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
-            placeholder="Type a response or use mic…" className="input" style={{ flex: 1 }} />
+            placeholder="Type a response or speak with mic…" className="input" style={{ flex: 1 }} />
           {canUseMic && (
             <button onClick={() => isStreamingMic ? stopMicStream() : void startMicStream()}
-              className={`btn ${isStreamingMic ? "btn-danger" : "btn-ghost"}`} style={{ padding: "0.5rem 0.85rem" }}
-              title="Microphone">
-              {isStreamingMic ? "⏹" : "🎙"}
+              className={`btn ${isStreamingMic ? "btn-danger" : "btn-ghost"}`} style={{ padding: "0.45rem 0.85rem" }}
+              aria-label={isStreamingMic ? "Stop microphone" : "Start microphone"} aria-pressed={isStreamingMic} title="Microphone">
+              {isStreamingMic ? <Square size={15} /> : <Mic size={15} />}
             </button>
           )}
-          <button onClick={send} className="btn btn-primary" style={{ padding: "0.5rem 1rem" }}>Send</button>
+          <button onClick={send} className="btn btn-primary" style={{ padding: "0.45rem 1rem" }}>
+            <span>Send</span>
+            <Send size={13} />
+          </button>
         </div>
       </div>
 
@@ -529,31 +554,32 @@ export default function LiveSessionPage() {
       <div style={{ display: "flex", flexDirection: "column", gap: "0.85rem" }}>
         {/* Camera */}
         <div className="card" style={{ padding: "1rem" }}>
-          <div style={{ fontSize: "0.78rem", fontWeight: 600, color: "var(--text-2)", marginBottom: "0.6rem" }}>📹 Camera</div>
+          <div style={{ fontSize: "0.8125rem", fontWeight: 600, color: "var(--text-2)", marginBottom: "0.6rem" }}>Camera</div>
           <div style={{ borderRadius: "var(--radius-md)", overflow: "hidden", background: "#000", aspectRatio: "4/3" }}>
-            <video ref={videoRef} muted playsInline style={{ width: "100%", height: "100%", objectFit: "cover", opacity: isStreamingVideo ? 1 : 0.2 }} />
+            <video aria-label="Your camera preview" ref={videoRef} muted playsInline style={{ width: "100%", height: "100%", objectFit: "cover", opacity: isStreamingVideo ? 1 : 0.2 }} />
             <canvas ref={canvasRef} style={{ display: "none" }} />
           </div>
-          <button onClick={() => isStreamingVideo ? stopVideoStream() : void startVideoStream()}
+          <button aria-pressed={isStreamingVideo} onClick={() => isStreamingVideo ? stopVideoStream() : void startVideoStream()}
             className={`btn ${isStreamingVideo ? "btn-danger" : "btn-ghost"}`}
-            style={{ marginTop: "0.6rem", width: "100%", justifyContent: "center", fontSize: "0.8rem" }}>
-            {isStreamingVideo ? "Stop camera" : "Start camera"}
+            style={{ marginTop: "0.6rem", width: "100%", justifyContent: "center", fontSize: "0.8125rem", padding: "0.45rem 1rem" }}>
+            {isStreamingVideo ? <VideoOff size={14} /> : <Video size={14} />}
+            <span>{isStreamingVideo ? "Stop camera" : "Start camera"}</span>
           </button>
 
           {/* Arc gauges */}
           {visionMetrics && (
             <div style={{ display: "flex", justifyContent: "space-around", marginTop: "0.75rem" }}>
-              <ArcGauge value={visionMetrics.eye_contact} label="Eye" color="#6366f1" />
-              <ArcGauge value={visionMetrics.posture === "good" ? 1 : visionMetrics.posture === "ok" ? 0.6 : 0.3} label="Posture" color="#10b981" />
-              <ArcGauge value={Math.max(0, 1 - visionMetrics.movement)} label="Steady" color="#f59e0b" />
+              <ArcGauge value={visionMetrics.eye_contact} label="Eye" color="#296e91" />
+              <ArcGauge value={visionMetrics.posture === "good" ? 1 : visionMetrics.posture === "ok" ? 0.6 : 0.3} label="Posture" color="#285c3b" />
+              <ArcGauge value={Math.max(0, 1 - visionMetrics.movement)} label="Steady" color="#735200" />
             </div>
           )}
         </div>
 
         {/* Nudges */}
         <div className="card" style={{ flex: 1, padding: "1rem", overflow: "hidden", display: "flex", flexDirection: "column" }}>
-          <div style={{ fontSize: "0.78rem", fontWeight: 700, color: "var(--text-2)", marginBottom: "0.6rem", display: "flex", alignItems: "center", gap: "0.4rem" }}>
-            <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#f43f5e", display: "inline-block", boxShadow: "0 0 6px #f43f5e" }} />
+          <div style={{ fontSize: "0.8125rem", fontWeight: 700, color: "var(--text-2)", marginBottom: "0.6rem", display: "flex", alignItems: "center", gap: "0.4rem" }}>
+            <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#9a2540", display: "inline-block", boxShadow: "0 0 6px #9a2540" }} />
             Live Nudges
           </div>
           <style>{`
@@ -564,35 +590,44 @@ export default function LiveSessionPage() {
           `}</style>
           <div style={{ display: "flex", flexDirection: "column", gap: "0.45rem", overflowY: "auto", flex: 1 }}>
             {nudges.length === 0 && (
-              <div style={{ fontSize: "0.78rem", color: "var(--text-3)", lineHeight: 1.5 }}>
+              <div style={{ fontSize: "0.8125rem", color: "var(--text-3)", lineHeight: 1.5 }}>
                 Vision signals and coaching cues will appear here as you speak.
               </div>
             )}
             {nudges.map((n) => {
               const isWarn = n.level === "warn";
               const isSuccess = n.level === "success";
-              const ICON: Record<string, string> = {
-                face: "◉", eye: "◎", posture: "▲", movement: "≋", lighting: "☀", mic: "⊘", error: "!", system: "→"
+              const ICON_MAP: Record<string, React.ReactNode> = {
+                face: <Smile size={14} />,
+                eye: <Eye size={14} />,
+                posture: <Activity size={14} />,
+                movement: <Move size={14} />,
+                lighting: <Sun size={14} />,
+                mic: <MicOff size={14} />,
+                error: <AlertCircle size={14} />,
+                system: <ArrowRight size={14} />
               };
-              const color = isWarn ? "#fbbf24" : isSuccess ? "#34d399" : "var(--primary-lt)";
-              const bg = isWarn ? "rgba(251,191,36,0.08)" : isSuccess ? "rgba(52,211,153,0.08)" : "rgba(255,255,255,0.025)";
-              const border = isWarn ? "rgba(251,191,36,0.22)" : isSuccess ? "rgba(52,211,153,0.2)" : "var(--border)";
+              const color = isWarn ? "#735200" : isSuccess ? "#285c3b" : "var(--primary-lt)";
+              const bg = isWarn ? "rgba(251,191,36,0.1)" : isSuccess ? "rgba(52,211,153,0.1)" : "rgba(255,255,255,0.7)";
+              const border = isWarn ? "rgba(251,191,36,0.3)" : isSuccess ? "rgba(52,211,153,0.3)" : "var(--border)";
               return (
                 <div key={n.id} style={{
-                  padding: "0.55rem 0.75rem", borderRadius: "var(--radius-md)",
-                  fontSize: "0.78rem", lineHeight: 1.5,
-                  background: bg, border: `1px solid ${border}`, color: "var(--text-2)",
-                  display: "flex", gap: "0.55rem", alignItems: "flex-start",
+                  padding: "0.5rem 0.75rem", borderRadius: "var(--radius-md)",
+                  fontSize: "0.8125rem", lineHeight: 1.45,
+                  background: bg, border: `1px solid ${border}`, color: "var(--ink)",
+                  display: "flex", gap: "0.5rem", alignItems: "flex-start",
                   animation: "nudgeIn 0.25s ease",
                 }}>
-                  <span style={{ color, fontWeight: 800, fontSize: "0.7rem", flexShrink: 0, marginTop: "0.1rem", fontVariantNumeric: "tabular-nums" }}>
-                    {ICON[n.category] ?? "·"}
+                  <span style={{ color, flexShrink: 0, marginTop: "0.15rem" }}>
+                    {ICON_MAP[n.category] ?? <AlertCircle size={14} />}
                   </span>
-                  <span>{n.message}</span>
+                  <span style={{ flex: 1 }}>{n.message}</span>
                   <button onClick={() => setNudges(p => p.filter(x => x.id !== n.id))}
                     style={{ marginLeft: "auto", background: "none", border: "none", cursor: "pointer",
-                      color: "var(--text-3)", fontSize: "0.7rem", padding: "0 0.2rem", flexShrink: 0, lineHeight: 1 }}
-                    title="Dismiss">✕</button>
+                      color: "var(--text-3)", padding: "0.1rem", flexShrink: 0, display: "inline-flex", alignItems: "center" }}
+                    aria-label="Dismiss coaching cue" title="Dismiss">
+                    <X size={12} />
+                  </button>
                 </div>
               );
             })}
