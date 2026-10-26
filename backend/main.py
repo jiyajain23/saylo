@@ -4,6 +4,7 @@ Port of server.ts + app.ts.
 
 Run with:
     uvicorn main:app --host 0.0.0.0 --port 5000 --reload
+
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from slowapi.util import get_remote_address
 from api.sessions import router as sessions_router
 from api.websocket import websocket_endpoint
 from utils.logger import logger
+from services.origins import allowed_origins
 
 # ── Rate limiter ───────────────────────────────────────────────────────────────
 
@@ -43,8 +45,7 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # ── CORS ───────────────────────────────────────────────────────────────────────
 
-_raw_origins = os.environ.get("ALLOWED_ORIGINS", "http://localhost:3000")
-_allowed_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()]
+_allowed_origins = allowed_origins()
 
 app.add_middleware(
     CORSMiddleware,
@@ -74,7 +75,7 @@ async def ws_endpoint(ws: WebSocket):
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    logger.error("[app] unhandled error", str(exc))
+    logger.error("[app] unhandled error", {"errorType": type(exc).__name__})
     return JSONResponse(status_code=500, content={"error": "internal_server_error"})
 
 

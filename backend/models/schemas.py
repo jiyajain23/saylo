@@ -17,11 +17,15 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Integer,
+    Index,
     String,
     Text,
     func,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.dialects.postgresql import UUID
+
+OWNER_ID = String().with_variant(UUID(as_uuid=False), "postgresql")
 
 
 # ── Enums ──────────────────────────────────────────────────────────────────────
@@ -49,16 +53,18 @@ class Base(DeclarativeBase):
 class User(Base):
     __tablename__ = "User"
 
-    id: Mapped[str] = mapped_column(String, primary_key=True)
+    id: Mapped[str] = mapped_column(OWNER_ID, primary_key=True)
     email: Mapped[Optional[str]] = mapped_column(String, unique=True, nullable=True)
     name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     createdAt: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
-    sessions: Mapped[list["Session"]] = relationship("Session", back_populates="user")
+    sessions: Mapped[list["Session"]] = relationship("Session", back_populates="user", cascade="all, delete-orphan", passive_deletes=True)
 
 
 class Session(Base):
     __tablename__ = "Session"
+    __table_args__ = (Index("ix_session_owner_created", "userId", "createdAt"),
+                      Index("ix_session_owner_status", "userId", "status"))
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     createdAt: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
@@ -70,7 +76,7 @@ class Session(Base):
     persona: Mapped[str] = mapped_column(String, default="DEFAULT")
     pressureLevel: Mapped[int] = mapped_column(Integer, default=0)
 
-    userId: Mapped[Optional[str]] = mapped_column(String, ForeignKey("User.id"), nullable=True)
+    userId: Mapped[Optional[str]] = mapped_column(OWNER_ID, ForeignKey("User.id", ondelete="CASCADE"), nullable=True)
     user: Mapped[Optional["User"]] = relationship("User", back_populates="sessions")
 
     contextRaw: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -86,6 +92,7 @@ class Session(Base):
 
 class TranscriptSegment(Base):
     __tablename__ = "TranscriptSegment"
+    __table_args__ = (Index("ix_segment_session_created", "sessionId", "createdAt"),)
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     sessionId: Mapped[str] = mapped_column(String, ForeignKey("Session.id", ondelete="CASCADE"))
@@ -94,6 +101,8 @@ class TranscriptSegment(Base):
     createdAt: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     speaker: Mapped[str] = mapped_column(String)   # "user" | "ai"
     text: Mapped[str] = mapped_column(Text)
+    audioStartSeconds: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    audioEndSeconds: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
 
 class AnalysisResult(Base):
@@ -112,6 +121,13 @@ class AnalysisResult(Base):
     strengths: Mapped[Optional[Any]] = mapped_column(JSON, nullable=True)
     weaknesses: Mapped[Optional[Any]] = mapped_column(JSON, nullable=True)
     suggestions: Mapped[Optional[Any]] = mapped_column(JSON, nullable=True)
+    voice: Mapped[Optional[Any]] = mapped_column(JSON, nullable=True)
+    emotion: Mapped[Optional[Any]] = mapped_column(JSON, nullable=True)
+    vision: Mapped[Optional[Any]] = mapped_column(JSON, nullable=True)
+    jobs: Mapped[Optional[Any]] = mapped_column(JSON, nullable=True)
+    errors: Mapped[Optional[Any]] = mapped_column(JSON, nullable=True)
+    insights: Mapped[Optional[Any]] = mapped_column(JSON, nullable=True)
+    scoring_version: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
 
 # ── Pydantic request/response schemas ──────────────────────────────────────────
@@ -173,6 +189,8 @@ class SegmentOut(BaseModel):
     createdAt: datetime
     speaker: str
     text: str
+    audioStartSeconds: Optional[float] = None
+    audioEndSeconds: Optional[float] = None
 
     class Config:
         from_attributes = True
@@ -190,6 +208,13 @@ class AnalysisResultOut(BaseModel):
     strengths: Optional[Any]
     weaknesses: Optional[Any]
     suggestions: Optional[Any]
+    voice: Optional[Any] = None
+    emotion: Optional[Any] = None
+    vision: Optional[Any] = None
+    jobs: Optional[Any] = None
+    errors: Optional[Any] = None
+    insights: Optional[Any] = None
+    scoring_version: Optional[str] = None
 
     class Config:
         from_attributes = True

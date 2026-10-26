@@ -51,6 +51,11 @@ app.add_middleware(
 app.include_router(analyze_router)
 
 
+@app.get("/health")
+async def health():
+    return {"ok": True}
+
+
 @app.on_event("startup")
 async def on_startup() -> None:
     logger.info("Analysis service started. Allowed origins: %s", _origins)

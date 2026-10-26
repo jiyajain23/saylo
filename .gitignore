@@ -4,6 +4,7 @@
 .env.development
 .env.production
 .env.*.local
+*.crt
 
 # Dependencies
 node_modules/
@@ -56,3 +57,8 @@ model/
 *.safetensors
 *.bin
 training_args.bin
+PHASE1_REPORT.MD
+PHASE2_REPORT.MD
+SUPABASE_SETUP.MD
+PLAN.MD
+.gitignore

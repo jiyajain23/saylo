@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createSession, endSession, type Scenario } from "../../lib/api";
 import { openLiveSocket } from "../../lib/socket";
+import { getAccessToken } from "../../lib/auth";
 import { useVisionMetrics, type VisionMetrics } from "../../hooks/useVisionMetrics";
 import {
   Mic,
@@ -102,6 +103,7 @@ export default function LiveSessionPage() {
   const isAnalyzingRef = useRef(false);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const startTimeRef = useRef<number>(0);
+  const finishingRef = useRef(false);
   const { analyze: analyzeVision } = useVisionMetrics(videoRef);
   const canUseMic = useMemo(() => typeof window !== "undefined" && Boolean(navigator.mediaDevices?.getUserMedia), []);
 
@@ -205,11 +207,13 @@ export default function LiveSessionPage() {
     }
   }
 
-  function stopMicStream() {
+  function stopMicStream(signalEnd = true) {
     const c = micCaptureRef.current; if (!c) return;
     c.processor.disconnect(); c.silentGain.disconnect(); c.source.disconnect();
     c.stream.getTracks().forEach((t) => t.stop()); void c.context.close();
-    micCaptureRef.current = null; socketRef.current?.endAudio(); setIsStreamingMic(false);
+    micCaptureRef.current = null;
+    if (signalEnd) socketRef.current?.endAudio();
+    setIsStreamingMic(false);
   }
 
   /** Push a nudge with per-category cooldown and auto-expiry. */
@@ -312,6 +316,7 @@ export default function LiveSessionPage() {
   async function start() {
     try {
       const sc = SCENARIOS.find((x) => x.id === scenario)!;
+      const accessToken = await getAccessToken(20 * 60);
       const { session } = await createSession({
         scenario, title, persona, pressureLevel,
         resumeText: resumeText || undefined, jobDescription: jobDescription || undefined,
@@ -324,13 +329,14 @@ export default function LiveSessionPage() {
       ensureAudioPlayback();
       const socket = openLiveSocket({
         sessionId: session.id,
+        accessToken,
         onAi: (text) => setTurns((t) => [...t, { speaker: "ai", text }]),
         onUserTranscript: (text) => setTurns((t) => [...t, { speaker: "user", text }]),
         onAiAudio: (audio) => playPcmAudio(audio.data, audio.mimeType),
       onNudge: (n: any) => { const id = ++nudgeIdRef.current; setNudges(x => [{ id, level: n.level ?? "info", category: n.category ?? "system", message: n.message ?? "", ts: Date.now() }, ...x].slice(0, 6)); setTimeout(() => setNudges(p => p.filter(x => x.id !== id)), 12000); },
       onError: (msg: string) => { const id = ++nudgeIdRef.current; setNudges(x => [{ id, level: "warn" as const, category: "error", message: msg, ts: Date.now() }, ...x].slice(0, 6)); setTimeout(() => setNudges(p => p.filter(x => x.id !== id)), 12000); }
       });
-    socketRef.current = socket; socket.sendUserText(sc.starter);
+    socketRef.current = socket; socket.sendUserText(sc.starter, true);
     // Welcome nudge after a short delay
     setTimeout(() => pushNudge("info", "system", "Session live. Keep your face centred and speak clearly.", 0), 1500);
     } catch (e) {
@@ -341,19 +347,28 @@ export default function LiveSessionPage() {
   }
 
   function send() {
-    const text = draft.trim(); if (!text || !sessionId) return;
+    const text = draft.trim(); if (!text || !sessionId || finishingRef.current) return;
     setTurns((t) => [...t, { speaker: "user", text }]);
     socketRef.current?.sendUserText(text); setDraft("");
   }
 
   async function finish() {
-    if (!sessionId) return; setStatus("ending");
-    stopMicStream(); stopVideoStream(); socketRef.current?.close();
-    if (timerRef.current) clearInterval(timerRef.current);
-    try { await endSession(sessionId); window.location.href = `/insights?sessionId=${encodeURIComponent(sessionId)}`; }
+    if (!sessionId || finishingRef.current) return;
+    finishingRef.current = true;
+    setStatus("ending");
+    stopMicStream(false); stopVideoStream();
+    try {
+      if (!socketRef.current) throw new Error("Live connection unavailable. Your session has not been ended.");
+      await socketRef.current.finishAudio();
+      await endSession(sessionId);
+      socketRef.current.close();
+      if (timerRef.current) clearInterval(timerRef.current);
+      window.location.href = `/insights?sessionId=${encodeURIComponent(sessionId)}`;
+    }
     catch (e) {
       setNudges((x) => [{ id: ++nudgeIdRef.current, level: "warn" as const, category: "error", message: e instanceof Error ? e.message : "Failed to end session.", ts: Date.now() }, ...x].slice(0, 5));
       setStatus("live");
+      finishingRef.current = false;
     }
   }
 

@@ -2,6 +2,7 @@ import "./globals.css";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { NavActive } from "@/components/NavActive";
+import { AuthProvider, AuthBoundary, AuthControls } from "@/components/AuthProvider";
 import { LayoutDashboard, Video, History, TrendingUp, Sparkles } from "lucide-react";
 
 export const metadata: Metadata = {
@@ -13,6 +14,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en" className="design">
       <body>
+        <AuthProvider>
         <a href="#main-content" className="skip-link">Skip to content</a>
         <div className="app-shell">
           <header className="site-header">
@@ -33,13 +35,15 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               <NavActive href="/roadmap" label="Roadmap" icon={<TrendingUp size={16} />} />
               <NavActive href="/speech" label="Speech Support" icon={<Sparkles size={16} />} />
             </nav>
+            <AuthControls />
           </header>
-          <main id="main-content" tabIndex={-1}>{children}</main>
+          <main id="main-content" tabIndex={-1}><AuthBoundary>{children}</AuthBoundary></main>
           <footer className="site-footer">
             <span className="footer-brand">saylo <span>•</span> A little practice. A clearer voice.</span>
             <span>Communication coach · v0.1</span>
           </footer>
         </div>
+        </AuthProvider>
       </body>
     </html>
   );

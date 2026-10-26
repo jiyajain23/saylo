@@ -1,18 +1,11 @@
-import { listSessions, getProgress } from "@/lib/api";
-import type { SessionListItem } from "@/lib/api";
-import { DashboardView, type ProgressData } from "@/components/DashboardView";
+import { PrivateDashboard } from "@/components/PrivateDataViews";
 
 export const metadata = {
   title: "Dashboard · saylo",
   description: "Track your speaking progress, confidence trends, and skill milestones across sessions."
 };
 
-export default async function DashboardPage() {
-  const [{ sessions }, progress] = await Promise.all([
-    listSessions().catch(() => ({ sessions: [] as SessionListItem[] })),
-    getProgress().catch(() => null)
-  ]);
-
+export default function DashboardPage() {
   return (
     <div className="animate-fade-in" style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
       <div className="page-heading">
@@ -22,7 +15,7 @@ export default async function DashboardPage() {
         </p>
       </div>
 
-      <DashboardView sessions={sessions} progress={progress as ProgressData | null} />
+      <PrivateDashboard />
     </div>
   );
 }

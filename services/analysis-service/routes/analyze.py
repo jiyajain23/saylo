@@ -5,10 +5,11 @@ Analysis endpoint — delegates to the LangGraph pipeline.
 import logging
 from typing import Any, Dict, List, Literal, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, Field, field_validator
 
 from graph.analysis_graph import run_analysis
+from service_auth import require_gateway
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -18,6 +19,8 @@ class TranscriptTurn(BaseModel):
     speaker: Literal["user", "ai"]
     text: str
     ts: Optional[str] = None
+    audioStartSeconds: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
+    audioEndSeconds: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
 
 
 class AnalyzeRequest(BaseModel):
@@ -42,7 +45,7 @@ class AnalyzeRequest(BaseModel):
         return normalized if normalized in {"INTERVIEW", "PITCH", "MEETING"} else "INTERVIEW"
 
 
-@router.post("/analyze")
+@router.post("/analyze", dependencies=[Depends(require_gateway)])
 async def analyze(req: AnalyzeRequest) -> Dict[str, Any]:
     """
     Run the full LangGraph analysis pipeline asynchronously:
@@ -75,7 +78,7 @@ async def analyze(req: AnalyzeRequest) -> Dict[str, Any]:
         )
     except Exception as exc:
         logger.exception("[analyze] pipeline failed")
-        raise HTTPException(status_code=500, detail=f"analysis pipeline error: {exc}") from exc
+        raise HTTPException(status_code=500, detail="analysis_pipeline_failed") from exc
 
     return {
         "speech":     state.get("speech", {}),
@@ -88,4 +91,5 @@ async def analyze(req: AnalyzeRequest) -> Dict[str, Any]:
         "insights":   state.get("insights", {}),
         "jobs":       state.get("jobs", []),
         "errors":     state.get("errors", []),
+        "scoring_version": state.get("scoring_version", "2"),
     }

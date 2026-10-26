@@ -1,8 +1,6 @@
 import Link from "next/link";
 import Image from "next/image";
-import { getProgress, listSessions } from "@/lib/api";
-import type { SessionListItem } from "@/lib/api";
-import { DashboardView, type ProgressData } from "@/components/DashboardView";
+import { HomeDashboard } from "@/components/PrivateDataViews";
 import {
   CheckCircle2,
   ArrowRight,
@@ -19,12 +17,7 @@ export const metadata = {
   description: "AI-powered speech coaching for interviews, pitches, and meetings"
 };
 
-export default async function HomePage() {
-  const [{ sessions }, progress] = await Promise.all([
-    listSessions().catch(() => ({ sessions: [] as SessionListItem[] })),
-    getProgress().catch(() => null)
-  ]);
-
+export default function HomePage() {
   return (
     <div className="animate-fade-in" style={{ display: "flex", flexDirection: "column" }}>
       {/* ── Big Full-Viewport Hero Section ─────────────────────────────────── */}
@@ -131,7 +124,7 @@ export default async function HomePage() {
           </Link>
         </div>
 
-        <DashboardView sessions={sessions} progress={progress as ProgressData | null} />
+        <HomeDashboard />
       </div>
     </div>
   );

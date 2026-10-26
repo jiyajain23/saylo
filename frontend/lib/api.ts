@@ -1,11 +1,15 @@
+import { getAccessToken } from "./auth";
+
 export const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:5000";
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
+  const accessToken = await getAccessToken();
   const res = await fetch(`${API_BASE}${path}`, {
     ...init,
     headers: {
       "content-type": "application/json",
-      ...(init?.headers || {})
+      ...(init?.headers || {}),
+      Authorization: `Bearer ${accessToken}`
     },
     cache: "no-store"
   });
@@ -79,4 +83,5 @@ export async function getSession(id: string) {
 export async function endSession(id: string) {
   return req<{ ok: true }>(`/sessions/${id}/end`, { method: "POST", body: JSON.stringify({}) });
 }
+
 
