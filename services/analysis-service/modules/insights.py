@@ -26,7 +26,7 @@ You are an expert communication coach analysing a {scenario} practice session.
 
 ## Session Scores
 - Overall confidence: {confidence:.0%}
-- Speech: WPM={wpm:.0f}, fillers={fillers}, score={speech_score:.0%}
+- Speech: WPM={wpm}, fillers={fillers}, score={speech_score:.0%}
 - NLP: clarity={clarity:.0%}, structure={structure:.0%}, relevance={relevance:.0%}
 - Alignment: matched signals={matched}, missing signals={missing}
 - Voice: arousal={arousal:.0%}, dominance={dominance:.0%}, valence={valence:.0%}
@@ -66,7 +66,7 @@ def _build_prompt(
     return _INSIGHT_PROMPT.format(
         scenario=scenario,
         confidence=confidence,
-        wpm=speech.get("wpm_estimate", 140),
+        wpm=(f"{speech['wpm_estimate']:.0f}" if speech.get("wpm_estimate") is not None else "unavailable (no measured speech timing)"),
         fillers=speech.get("fillers", 0),
         speech_score=speech.get("score", 0.7),
         clarity=nlp.get("clarity", 0.7),

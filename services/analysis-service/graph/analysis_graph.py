@@ -93,18 +93,8 @@ def run_analysis(
     Run the full analysis pipeline and return the final state.
     All parallel nodes execute concurrently via LangGraph's async runtime.
     """
-    MAX_USER_CHARS = 8_000
-    MAX_FULL_CHARS = 12_000
-
     user_text = "\n".join(t["text"] for t in transcript if t.get("speaker") == "user")
     full_text = "\n".join(f"{t['speaker']}: {t['text']}" for t in transcript)
-
-    if len(user_text) > MAX_USER_CHARS:
-        logger.warning("[graph] user_text truncated %d → %d chars", len(user_text), MAX_USER_CHARS)
-        user_text = user_text[:MAX_USER_CHARS]
-    if len(full_text) > MAX_FULL_CHARS:
-        logger.warning("[graph] full_text truncated %d → %d chars", len(full_text), MAX_FULL_CHARS)
-        full_text = full_text[:MAX_FULL_CHARS]
 
     initial_state: AnalysisState = {
         "scenario": (scenario or "INTERVIEW").upper(),
@@ -116,6 +106,7 @@ def run_analysis(
         "audio_sample_rate": audio_sample_rate,
         "video_frames_b64": video_frames_b64,
         "errors": [],
+        "scoring_version": "2",
         # Defaults (overwritten by nodes)
         "speech": {},
         "nlp": {},

@@ -18,6 +18,7 @@ from modules.emotion import analyze_emotion
 from modules.insights import generate_insights
 from modules.job_match import generate_job_recommendations
 from modules.template_store import maybe_add_template
+from modules.transcript import answer_pairs, measured_duration
 
 logger = logging.getLogger(__name__)
 
@@ -27,40 +28,49 @@ logger = logging.getLogger(__name__)
 def speech_node(state: AnalysisState) -> Dict[str, Any]:
     """Analyse speech metrics from the user transcript text."""
     try:
-        result = analyze_speech(state["user_text"])
-        logger.info("[node:speech] score=%.3f wpm=%.0f fillers=%d",
+        result = analyze_speech(state["user_text"], measured_duration(state.get("transcript", [])))
+        logger.info("[node:speech] score=%.3f wpm=%s fillers=%d",
                     result.get("score", 0), result.get("wpm_estimate", 0), result.get("fillers", 0))
         return {"speech": result}
     except Exception as exc:
         logger.exception("[node:speech] failed: %s", exc)
         return {"speech": {"score": 0.70, "error": str(exc)},
-                "errors": state.get("errors", []) + [f"speech: {exc}"]}
+                "errors": [f"speech: {exc}"]}
 
 
 def nlp_node(state: AnalysisState) -> Dict[str, Any]:
     """Analyse language quality, structure, and relevance (STAR classifier → MiniLM → regex)."""
     try:
-        result = analyze_language(state["full_text"], state.get("context", {}), state["scenario"])
+        pairs = answer_pairs(state.get("transcript", [])) or [(None, state["user_text"])]
+        answers = [analyze_language(text, state.get("context", {}), state["scenario"], question=question)
+                   for question, text in pairs]
+        result = {key: round(sum(a.get(key, .70) for a in answers) / len(answers), 3)
+                  for key in ("score", "clarity", "structure", "relevance")}
+        for key in ("strengths", "weaknesses", "suggestions"):
+            result[key] = list(dict.fromkeys(item for a in answers for item in a.get(key, [])))[:5]
+        result["scoring_method"] = "+".join(dict.fromkeys(a.get("scoring_method", "unknown") for a in answers))
+        result["aggregation"] = "equal_weight_per_user_answer"
+        result["answer_count"] = len(answers)
         logger.info("[node:nlp] method=%s structure=%.3f relevance=%.3f clarity=%.3f",
                     result.get("scoring_method"), result.get("structure"), result.get("relevance"), result.get("clarity"))
         return {"nlp": result}
     except Exception as exc:
         logger.exception("[node:nlp] failed: %s", exc)
         return {"nlp": {"score": 0.70, "error": str(exc)},
-                "errors": state.get("errors", []) + [f"nlp: {exc}"]}
+                "errors": [f"nlp: {exc}"]}
 
 
 def alignment_node(state: AnalysisState) -> Dict[str, Any]:
     """Detect scenario signals via semantic embedding (catches paraphrases)."""
     try:
-        result = analyze_alignment(state["scenario"], state["full_text"], state.get("context", {}))
+        result = analyze_alignment(state["scenario"], state["user_text"], state.get("context", {}))
         logger.info("[node:alignment] method=%s matched=%s score=%.3f",
                     result.get("scoring_method"), result.get("matchedSignals"), result.get("score"))
         return {"alignment": result}
     except Exception as exc:
         logger.exception("[node:alignment] failed: %s", exc)
         return {"alignment": {"score": 0.65, "error": str(exc)},
-                "errors": state.get("errors", []) + [f"alignment: {exc}"]}
+                "errors": [f"alignment: {exc}"]}
 
 
 def voice_node(state: AnalysisState) -> Dict[str, Any]:
@@ -95,7 +105,7 @@ def voice_node(state: AnalysisState) -> Dict[str, Any]:
     except Exception as exc:
         logger.exception("[node:voice] librosa failed: %s", exc)
         return {"voice": {"available": False, "confidence_score": 0.68, "error": str(exc)},
-                "errors": state.get("errors", []) + [f"voice: {exc}"]}
+                "errors": [f"voice: {exc}"]}
 
 
 def emotion_node(state: AnalysisState) -> Dict[str, Any]:
@@ -109,7 +119,7 @@ def emotion_node(state: AnalysisState) -> Dict[str, Any]:
         logger.exception("[node:emotion] failed: %s", exc)
         return {"emotion": {"available": False, "dominant_emotion": "neutral",
                             "confidence_adjustment": 0.0, "highlights": [], "error": str(exc)},
-                "errors": state.get("errors", []) + [f"emotion: {exc}"]}
+                "errors": [f"emotion: {exc}"]}
 
 
 def vision_node(state: AnalysisState) -> Dict[str, Any]:
@@ -191,6 +201,6 @@ def jobs_node(state: AnalysisState) -> Dict[str, Any]:
 
 def template_store_node(state: AnalysisState) -> Dict[str, Any]:
     """If this was a high-confidence session, persist transcript as a gold standard template."""
-    confidence = state.get("confidence", 0.0)
-    maybe_add_template(state["scenario"], state["user_text"], confidence)
+    # Reviewed templates remain available to NLP. Public-user speech must not
+    # silently become shared training/scoring material.
     return {}   # no state update needed

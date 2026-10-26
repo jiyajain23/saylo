@@ -20,6 +20,7 @@ import numpy as np
 import concurrent.futures
 
 from modules.template_store import get_templates
+from modules.transcript import text_windows
 
 logger = logging.getLogger(__name__)
 
@@ -152,7 +153,7 @@ def _semantic_relevance(model, user_text: str, context: Dict[str, Any]) -> float
         return 0.72
 
 
-def _star_classify(user_text: str, scenario: str) -> Optional[Tuple[float, float]]:
+def _star_classify(user_text: str, scenario: str, question: Optional[str] = None) -> Optional[Tuple[float, float]]:
     """
     Run the fine-tuned STAR DistilBERT classifier.
     Returns (structure_score, relevance_score) both in [0, 1], or None if unavailable.
@@ -163,10 +164,10 @@ def _star_classify(user_text: str, scenario: str) -> Optional[Tuple[float, float
         return None
     try:
         import torch
-        # Encode question+answer as a pair; use scenario as pseudo-question context
-        question_ctx = f"[{scenario}] Evaluate this answer for structure and relevance:"
+        question_ctx = question or f"[{scenario}] Evaluate this answer for structure and relevance:"
+        # Match the training notebook's single Question/Answer input format.
         inputs = tokenizer(
-            question_ctx, user_text,
+            f"Question: {question_ctx}\nAnswer: {user_text}",
             return_tensors="pt",
             truncation=True,
             max_length=512,
@@ -308,30 +309,35 @@ def _relevance_suggestion(scenario: str) -> str:
     return "Explicitly map your example to what the role needs: skills, decisions, and impact."
 
 
-def analyze_language(text: str, context: Dict[str, Any], scenario: str = "INTERVIEW") -> Dict[str, Any]:
-    scenario = (scenario or "INTERVIEW").upper()
+def _clarity(text: str) -> tuple[float, int]:
     word_count = len(re.findall(r"\b[\w']+\b", text))
-
-    # ── Clarity (deterministic — regex is correct here) ───────────────────────
-    clarity = 0.85
-    if word_count > 420:
-        clarity = 0.68
-    elif word_count > 280:
-        clarity = 0.75
-
+    clarity = .68 if word_count > 420 else .75 if word_count > 280 else .85
     weak_hits = len(WEAK_LANGUAGE_RE.findall(text))
-    vague_opener = bool(VAGUE_OPENER_RE.search(text.strip()))
-    clarity -= min(0.15, weak_hits * 0.02)
-    if vague_opener:
-        clarity -= 0.04
-    clarity = round(max(0.45, min(clarity, 0.95)), 3)
+    clarity -= min(.15, weak_hits * .02)
+    if VAGUE_OPENER_RE.search(text.strip()):
+        clarity -= .04
+    return round(max(.45, min(clarity, .95)), 3), weak_hits
+
+
+def analyze_language(text: str, context: Dict[str, Any], scenario: str = "INTERVIEW", question: Optional[str] = None) -> Dict[str, Any]:
+    scenario = (scenario or "INTERVIEW").upper()
+    clarity, weak_hits = _clarity(text)
+    windows = text_windows(text)
+    if len(windows) > 1:
+        results = [analyze_language(window, context, scenario, question) for window in windows]
+        weights = [max(1, len(window.split())) for window in windows]
+        total = sum(weights)
+        structure, relevance = (round(sum(r[key] * weight for r, weight in zip(results, weights)) / total, 3)
+                                for key in ("structure", "relevance"))
+        method = "+".join(dict.fromkeys(r["scoring_method"] for r in results))
+        return _language_result(clarity, structure, relevance, method, weak_hits, scenario)
 
     # ── Semantic scoring (structure + relevance) ───────────────────────────────
-    # Truncate early — models only benefit from ~120 tokens; extra chars just slow encoding
-    model_text = text[:600]
+    # Each window fits the existing small-model budget; all windows are scored.
+    model_text = text
 
     # Priority 1: Fine-tuned STAR classifier
-    star_result = _star_classify(model_text, scenario)
+    star_result = _star_classify(model_text, scenario, question)
 
     if star_result is not None:
         structure, relevance = star_result
@@ -364,6 +370,10 @@ def analyze_language(text: str, context: Dict[str, Any], scenario: str = "INTERV
                 relevance = _regex_fallback_relevance(model_text, context)
                 method = "regex_fallback"
 
+    return _language_result(clarity, structure, relevance, method, weak_hits, scenario)
+
+
+def _language_result(clarity, structure, relevance, method, weak_hits, scenario):
     logger.info("[nlp] scoring method=%s structure=%.3f relevance=%.3f clarity=%.3f",
                 method, structure, relevance, clarity)
 

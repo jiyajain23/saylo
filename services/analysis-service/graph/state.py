@@ -5,7 +5,8 @@ All nodes read from and write into this shared TypedDict.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Optional
+import operator
 from typing_extensions import TypedDict
 
 
@@ -34,4 +35,5 @@ class AnalysisState(TypedDict, total=False):
     jobs: List[Dict[str, Any]]
 
     # ── Metadata ───────────────────────────────────────────────────────────────
-    errors: List[str]                  # non-fatal errors collected during the run
+    errors: Annotated[List[str], operator.add]
+    scoring_version: str

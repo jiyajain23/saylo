@@ -106,15 +106,15 @@ def _semantic_detect(user_text: str, scenario: str) -> Tuple[List[str], List[str
     """
     model = _get_model()
     if model is None:
-        return [], list(SCENARIO_SIGNALS.get(scenario, SCENARIO_SIGNALS["INTERVIEW"]).keys())
+        return [], []  # Explicitly request the existing regex fallback.
 
     names, sig_embeddings = _embed_signal_descriptions(scenario)
     if names is None:
-        return [], list(SCENARIO_SIGNALS.get(scenario, SCENARIO_SIGNALS["INTERVIEW"]).keys())
+        return [], []
 
     # Encode the user text in overlapping chunks to handle long answers
     # (MiniLM max 256 tokens — chunk at ~500 chars with overlap)
-    text = user_text[:3000]
+    text = user_text
     chunks = []
     step = 450
     for i in range(0, max(1, len(text)), step):

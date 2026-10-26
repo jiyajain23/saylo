@@ -22,81 +22,58 @@ os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 logger = logging.getLogger(__name__)
 
 MODEL_NAME = "audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim"
+MODEL_REVISION = "6eba34a2485ea31cb03600241787c3a5edab8626"
 TARGET_SR = 16000   # wav2vec2 expects 16kHz mono
 
 
 @lru_cache(maxsize=1)
 def _get_model_processor():
-    """
-    Load audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim correctly.
+    """Use the publisher's EmotionModel, loading trunk and trained head together.
 
-    The audeering model uses a custom architecture: wav2vec2 trunk + a small
-    MLP regression head (projector + classifier) that is NOT a standard
-    HuggingFace head. AutoModelForAudioClassification does NOT load the
-    regression weights — only AutoModel loads the trunk, and the head weights
-    must be applied separately.
-
-    We use the recommended audeering loading pattern: load with AutoModel,
-    then attach the trained head by downloading the full checkpoint and
-    reading the custom weight keys.
+    Source: https://huggingface.co/audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim
+    Missing/mismatched weights are fatal to this model, never random predictions.
     """
     try:
-        try:
-            from transformers import AutoProcessor, AutoModel  # type: ignore
-        except (ImportError, AttributeError):
-            from transformers.models.auto.processing_auto import AutoProcessor  # type: ignore
-            from transformers.models.auto.modeling_auto import AutoModel  # type: ignore
-        import torch  # type: ignore
-        import torch.nn as nn  # type: ignore
+        import torch
+        from transformers import Wav2Vec2Processor
+        from transformers.models.wav2vec2.modeling_wav2vec2 import Wav2Vec2Model, Wav2Vec2PreTrainedModel
 
-        logger.info("[voice-emotion] loading model: %s (this may take a moment)", MODEL_NAME)
-        processor = AutoProcessor.from_pretrained(MODEL_NAME)
-
-        # Load the full state dict including the custom regression head
-        base_model = AutoModel.from_pretrained(MODEL_NAME)
-
-        # Audeering regression head: Linear(1024→1024) + tanh + Linear(1024→3)
-        class _AuderingHead(nn.Module):
-            def __init__(self):
+        class RegressionHead(torch.nn.Module):
+            def __init__(self, config):
                 super().__init__()
-                self.dense = nn.Linear(1024, 1024)
-                self.out_proj = nn.Linear(1024, 3)
+                self.dense = torch.nn.Linear(config.hidden_size, config.hidden_size)
+                self.dropout = torch.nn.Dropout(config.final_dropout)
+                self.out_proj = torch.nn.Linear(config.hidden_size, config.num_labels)
 
-            def forward(self, hidden):
-                # Mean-pool over time
-                pooled = hidden.mean(dim=1) if hidden.ndim == 3 else hidden
-                x = torch.tanh(self.dense(pooled))
-                return self.out_proj(x)
+            def forward(self, features):
+                return self.out_proj(self.dropout(torch.tanh(self.dense(self.dropout(features)))))
 
-        head = _AuderingHead()
+        class EmotionModel(Wav2Vec2PreTrainedModel):
+            def __init__(self, config):
+                super().__init__(config)
+                self.wav2vec2 = Wav2Vec2Model(config)
+                self.classifier = RegressionHead(config)
+                self.init_weights()
 
-        # Try to load trained head weights from the hub checkpoint
-        try:
-            import torch
-            from huggingface_hub import hf_hub_download  # type: ignore
-            ckpt_path = hf_hub_download(MODEL_NAME, filename="pytorch_model.bin",
-                                        local_files_only=False)
-            full_sd = torch.load(ckpt_path, map_location="cpu", weights_only=True)
-            head_sd = {
-                k.replace("classifier.", ""): v
-                for k, v in full_sd.items()
-                if k.startswith("classifier.")
-            }
-            if head_sd:
-                head.load_state_dict(head_sd)
-                logger.info("[voice-emotion] regression head weights loaded (%d keys)", len(head_sd))
-            else:
-                logger.warning("[voice-emotion] no head weights found in checkpoint — scores may be inaccurate")
-        except Exception as head_exc:
-            logger.warning("[voice-emotion] could not load head weights: %s — using random init", head_exc)
+            def forward(self, input_values):
+                return self.classifier(self.wav2vec2(input_values)[0].mean(dim=1))
 
-        base_model.eval()
-        head.eval()
-        logger.info("[voice-emotion] model loaded")
-        return processor, (base_model, head)
+        options = {"revision": MODEL_REVISION}
+        processor = Wav2Vec2Processor.from_pretrained(MODEL_NAME, **options)
+        model, info = EmotionModel.from_pretrained(
+            MODEL_NAME, output_loading_info=True, use_safetensors=True, **options)
+        _validate_loaded_weights(info)
+        model.eval()
+        logger.info("[voice-emotion] trained model loaded revision=%s", MODEL_REVISION)
+        return processor, model
     except Exception as exc:
         logger.warning("[voice-emotion] could not load model: %s", exc)
         return None, None
+
+
+def _validate_loaded_weights(info: dict) -> None:
+    if any(info.get(key) for key in ("missing_keys", "mismatched_keys", "error_msgs")):
+        raise ValueError("Incomplete voice emotion checkpoint")
 
 
 
@@ -105,7 +82,7 @@ def _decode_pcm(b64_data: str, sample_rate: int) -> Optional[Tuple["Any", int]]:
     """Decode base64 PCM → numpy float32 at TARGET_SR."""
     try:
         import numpy as np
-        raw = base64.b64decode(b64_data)
+        raw = base64.b64decode(b64_data, validate=True)
         samples = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
 
         # Limit to last 30s for speed (wav2vec2 is slow on long audio)
@@ -126,11 +103,9 @@ def _decode_pcm(b64_data: str, sample_rate: int) -> Optional[Tuple["Any", int]]:
 
 def _predict_dimensions(samples: "Any") -> Optional[Dict[str, float]]:
     """Run the model and return arousal/valence/dominance in [0, 1]."""
-    processor, model_pair = _get_model_processor()
-    if processor is None or model_pair is None:
+    processor, model = _get_model_processor()
+    if processor is None or model is None:
         return None
-
-    base_model, head = model_pair
 
     try:
         import torch
@@ -140,11 +115,13 @@ def _predict_dimensions(samples: "Any") -> Optional[Dict[str, float]]:
         inputs = processor(samples, sampling_rate=TARGET_SR, return_tensors="pt", padding=True)
         with torch.no_grad():
             # Get last hidden state from the wav2vec2 trunk
-            hidden = base_model(**inputs).last_hidden_state  # (1, T, 1024)
-            logits = head(hidden)  # (1, 3): [arousal, dominance, valence]
+            logits = model(inputs["input_values"])  # [arousal, dominance, valence]
 
         preds = logits.squeeze().tolist()
         if not isinstance(preds, list) or len(preds) < 3:
+            return None
+        import math
+        if not all(math.isfinite(float(value)) for value in preds):
             return None
 
         # The MSP-podcast model outputs continuous regression dimensions in ~[0.0, 1.0]
