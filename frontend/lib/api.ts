@@ -11,9 +11,13 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
       ...(init?.headers || {}),
       Authorization: `Bearer ${accessToken}`
     },
-    cache: "no-store"
+    cache: "no-store",
+    signal: init?.signal ?? AbortSignal.timeout(path.endsWith("/end") ? 150000 : 45000)
   });
-  if (!res.ok) throw new Error(`${res.status}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error(typeof body?.detail === "string" ? body.detail : `${res.status}`);
+  }
   return (await res.json()) as T;
 }
 

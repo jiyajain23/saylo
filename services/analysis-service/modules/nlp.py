@@ -79,38 +79,16 @@ def _get_star_model():
 CROSS_ENCODER_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
 
-@lru_cache(maxsize=1)
 def _get_cross_encoder():
     """Load the Cross-Encoder relevance model (Priority 2 scorer)."""
-    try:
-        try:
-            from sentence_transformers import CrossEncoder  # type: ignore
-        except (ImportError, AttributeError):
-            from sentence_transformers.cross_encoder import CrossEncoder  # type: ignore
-        logger.info("[nlp] loading cross-encoder: %s", CROSS_ENCODER_NAME)
-        model = CrossEncoder(CROSS_ENCODER_NAME, max_length=512)
-        logger.info("[nlp] cross-encoder loaded successfully")
-        return model
-    except Exception as exc:
-        logger.warning("[nlp] cross-encoder unavailable: %s — will fall back to sentence-transformer", exc)
-        return None
+    from modules.model_registry import cross_encoder
+    return cross_encoder()
 
 
-@lru_cache(maxsize=1)
 def _get_model():
     """Load MiniLM semantic model (Priority 3 structure scorer)."""
-    try:
-        import sentence_transformers
-        st_cls = getattr(sentence_transformers, "SentenceTransformer", None)
-        if not callable(st_cls):
-            from sentence_transformers.SentenceTransformer import SentenceTransformer as st_cls
-        logger.info("[nlp] loading sentence-transformer model: %s", MODEL_NAME)
-        model = st_cls(MODEL_NAME)
-        logger.info("[nlp] model loaded successfully")
-        return model
-    except Exception as exc:
-        logger.warning("[nlp] sentence-transformers unavailable: %s — falling back to regex NLP", exc)
-        return None
+    from modules.model_registry import sentence_model
+    return sentence_model()
 
 
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:

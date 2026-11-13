@@ -3,6 +3,9 @@ Analysis endpoint — delegates to the LangGraph pipeline.
 """
 
 import logging
+import asyncio
+import time
+from threading import Lock
 from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, HTTPException, Depends
@@ -13,6 +16,9 @@ from service_auth import require_gateway
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+_inference = None
+_progress: dict[str, dict] = {}
+_progress_lock = Lock()
 
 
 class TranscriptTurn(BaseModel):
@@ -27,15 +33,19 @@ class AnalyzeRequest(BaseModel):
     scenario: str = Field(default="INTERVIEW")
     context: Dict[str, Any] = Field(default_factory=dict)
     transcript: List[TranscriptTurn]
-    audio_b64: Optional[str] = Field(default=None)
+    audio_b64: Optional[str] = Field(default=None, max_length=38400000)
     audio_sample_rate: int = Field(default=16000)
     video_frames_b64: Optional[List[str]] = Field(default=None)
+    job_id: Optional[str] = Field(default=None, max_length=80)
+    session_id: Optional[str] = Field(default=None, max_length=80)
 
     @field_validator("transcript")
     @classmethod
     def transcript_not_empty(cls, v):
         if not v:
             raise ValueError("transcript must contain at least one turn")
+        if sum(len(turn.text) for turn in v) > 120000:
+            raise ValueError("transcript limit exceeded")
         return v
 
     @field_validator("scenario")
@@ -53,7 +63,7 @@ async def analyze(req: AnalyzeRequest) -> Dict[str, Any]:
       + text emotion + vision → aggregator → Gemini insight agent → job matching
     Pipeline is offloaded to a thread so the event loop stays responsive.
     """
-    import asyncio
+    global _inference
     import functools
 
     transcript_dicts = [t.model_dump() for t in req.transcript]
@@ -63,8 +73,19 @@ async def analyze(req: AnalyzeRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=422, detail="No user turns found in transcript")
 
     loop = asyncio.get_event_loop()
+    if _inference is not None and not _inference.done():
+        raise HTTPException(503, "analysis_busy")
     try:
-        state = await loop.run_in_executor(
+        def progress(event):
+            if not req.job_id:
+                return
+            with _progress_lock:
+                current = _progress.setdefault(req.job_id, {"events": [], "updatedAt": time.time()})
+                current["events"] = (current["events"] + [event])[-40:]
+                current["updatedAt"] = time.time()
+                current["sessionId"] = req.session_id
+
+        _inference = loop.run_in_executor(
             None,
             functools.partial(
                 run_analysis,
@@ -74,8 +95,12 @@ async def analyze(req: AnalyzeRequest) -> Dict[str, Any]:
                 audio_b64=req.audio_b64,
                 audio_sample_rate=req.audio_sample_rate,
                 video_frames_b64=req.video_frames_b64,
+                progress_callback=progress,
             )
         )
+        # Request cancellation must not release capacity while the CPU thread
+        # still uses the models. Subsequent attempts receive a bounded retry.
+        state = await asyncio.shield(_inference)
     except Exception as exc:
         logger.exception("[analyze] pipeline failed")
         raise HTTPException(status_code=500, detail="analysis_pipeline_failed") from exc
@@ -93,3 +118,13 @@ async def analyze(req: AnalyzeRequest) -> Dict[str, Any]:
         "errors":     state.get("errors", []),
         "scoring_version": state.get("scoring_version", "2"),
     }
+
+
+@router.get("/progress/{job_id}", dependencies=[Depends(require_gateway)])
+async def progress(job_id: str) -> Dict[str, Any]:
+    with _progress_lock:
+        value = _progress.get(job_id)
+        if value is None:
+            return {"jobId": job_id, "events": []}
+        return {"jobId": job_id, "sessionId": value.get("sessionId"),
+                "events": list(value.get("events", [])), "updatedAt": value.get("updatedAt")}

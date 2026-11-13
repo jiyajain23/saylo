@@ -33,9 +33,11 @@ def database_settings(raw: str):
         connect["ssl"] = ssl.create_default_context(cafile=os.environ.get("DATABASE_SSL_CA_FILE") or None)
     elif url.host not in ("localhost", "127.0.0.1", "::1"):
         raise RuntimeError("DATABASE_SSL=disable is restricted to loopback test databases")
+    pool_size = int(os.environ.get("DATABASE_POOL_SIZE", "2"))
+    max_overflow = int(os.environ.get("DATABASE_MAX_OVERFLOW", "0"))
     return url.set(drivername="postgresql+asyncpg", query=query), {
-        "connect_args": connect, "pool_size": 2, "max_overflow": 0,
-        "pool_pre_ping": True, "pool_recycle": 300, "pool_timeout": 15,
+        "connect_args": connect, "pool_size": pool_size, "max_overflow": max_overflow,
+        "pool_pre_ping": True, "pool_recycle": 600, "pool_timeout": 15,
     }
 
 
@@ -64,6 +66,8 @@ async def init_db():
             from migrations.phase1 import upgrade
             await conn.run_sync(Base.metadata.create_all)
             await conn.run_sync(upgrade)
+            from migrations.phase3_local import upgrade as upgrade_reliability
+            await conn.run_sync(upgrade_reliability)
             for table in Base.metadata.tables.values():
                 for index in table.indexes:
                     await conn.run_sync(lambda sync, ix=index: ix.create(sync, checkfirst=True))

@@ -11,7 +11,9 @@ from unittest.mock import AsyncMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
-from models.schemas import Base, Session, User, AnalysisResult, TranscriptSegment
+from models.schemas import Base, Session, User, AnalysisResult, TranscriptSegment, AnalysisJob
+from sqlalchemy import select
+from services.jobs import claim_job, complete_job
 from services.auth import Principal
 from api import sessions
 from services.gemini import GeminiLiveSession, _setup_message
@@ -44,14 +46,10 @@ class PersistenceTests(unittest.IsolatedAsyncioTestCase):
         async def finish():
             async with self.factory() as db:
                 return await sessions.end_session("fixture", db, TEST_USER)
-        task = AsyncMock()
-        with patch.object(sessions, "_run_analysis_task", task), \
-             patch.object(sessions.audio_buffer_store, "pop", return_value="audio") as pop:
-            results = await asyncio.gather(finish(), finish(), finish())
-            await asyncio.sleep(0)
+        results = await asyncio.gather(finish(), finish(), finish())
         self.assertTrue(all(r["ok"] for r in results))
-        self.assertEqual(task.call_count, 1)
-        self.assertEqual(pop.call_count, 1)
+        async with self.factory() as db:
+            self.assertEqual(len((await db.scalars(select(AnalysisJob))).all()), 1)
 
     async def test_complete_analysis_survives_reload(self):
         payload = {"speech": {"score": .7}, "nlp": {"score": .8}, "alignment": {"score": .9},
@@ -60,14 +58,12 @@ class PersistenceTests(unittest.IsolatedAsyncioTestCase):
                    "insights": {"strengths": ["clear"], "weaknesses": [], "suggestions": [],
                                 "highlights": [], "coaching_note": "specific note", "generated_by": "fixture"},
                    "scoring_version": "2"}
-        response = AsyncMock()
-        response.status_code = 200
-        response.json = lambda: payload
-        client = AsyncMock()
-        client.__aenter__.return_value.post.return_value = response
-        with patch.dict("os.environ", {"ANALYSIS_SERVICE_TOKEN": "fixture-token-" * 4}), \
-             patch("db.AsyncSessionLocal", self.factory), patch.object(sessions.httpx, "AsyncClient", return_value=client):
-            await sessions._run_analysis_task("fixture", "INTERVIEW", {}, [], None, TEST_USER.id)
+        async with self.factory() as db:
+            await sessions.end_session("fixture", db, TEST_USER)
+        async with self.factory() as db:
+            job = await claim_job(db)
+        async with self.factory() as db:
+            await complete_job(db, job.id, job.leaseToken, payload)
         async with self.factory() as db:
             detail = await sessions.get_session("fixture", db, TEST_USER)
         result = detail["session"]["analysis"]
@@ -85,12 +81,14 @@ class PersistenceTests(unittest.IsolatedAsyncioTestCase):
                 await db.commit()
         completion.register("fixture", drain)
         try:
-            with patch.object(sessions, "_run_analysis_task", AsyncMock()) as analysis:
-                async with self.factory() as db:
-                    await sessions.end_session("fixture", db, TEST_USER)
-                await asyncio.sleep(0)
+            async with self.factory() as db:
+                await sessions.end_session("fixture", db, TEST_USER)
             self.assertEqual(entered, ["drained"])
-            self.assertIn("late persisted words", [turn["text"] for turn in analysis.call_args.args[3]])
+            from worker import payload_for
+            async with self.factory() as db: job = await claim_job(db)
+            with patch("worker.AsyncSessionLocal", self.factory):
+                payload = await payload_for(job)
+            self.assertIn("late persisted words", [turn["text"] for turn in payload["transcript"]])
         finally:
             completion.unregister("fixture", drain)
 
@@ -149,7 +147,8 @@ class PersistenceTests(unittest.IsolatedAsyncioTestCase):
         with patch("api.websocket.AsyncSessionLocal", self.factory), \
              patch("api.websocket.verify_access_token", AsyncMock(return_value=TEST_USER)), \
              patch("api.websocket.create_gemini_live_session", side_effect=create), \
-             patch("api.websocket.audio_buffer_store.append"):
+             patch("api.websocket.AudioStorage.check_private", AsyncMock()), \
+             patch("api.websocket.audio_buffer_store.append", return_value=2):
             await websocket_endpoint(Socket())
         self.assertEqual(len([s for s in sent if s.get("type") == "audio_ended" and s.get("ok")]), 2)
         async with self.factory() as db:
@@ -159,6 +158,32 @@ class PersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("start interview", [s["text"] for s in segments])
         audio = next(s for s in segments if s["text"] == "um um last words")
         self.assertEqual((audio["audioStartSeconds"], audio["audioEndSeconds"]), (1., 3.))
+
+    async def test_realistic_audio_cadence_is_not_rejected_by_control_rate_limit(self):
+        from fastapi import WebSocketDisconnect
+        received = [{"type": "hello", "sessionId": "fixture", "accessToken": "fixture-token"}]
+        received.extend({"type": "audio_chunk", "sessionId": "fixture", "data": "AAA="} for _ in range(120))
+        sent = []
+        class Socket:
+            headers = {"origin": "http://localhost:3000"}
+            async def accept(self): pass
+            async def send_text(self, text): sent.append(json.loads(text))
+            async def receive_text(self):
+                if received: return json.dumps(received.pop(0))
+                raise WebSocketDisconnect()
+            async def close(self, code=1000): pass
+        async def create(**callbacks):
+            class Live:
+                async def send_audio(self, *args): pass
+                async def close(self): pass
+            return Live()
+        with patch("api.websocket.AsyncSessionLocal", self.factory), \
+             patch("api.websocket.verify_access_token", AsyncMock(return_value=TEST_USER)), \
+             patch("api.websocket.create_gemini_live_session", side_effect=create), \
+             patch("api.websocket.AudioStorage.check_private", AsyncMock()), \
+             patch("api.websocket.audio_buffer_store.append", return_value=2):
+            await websocket_endpoint(Socket())
+        self.assertNotIn("message_rate_limit", [message.get("message") for message in sent])
 
 
 class MigrationTests(unittest.TestCase):

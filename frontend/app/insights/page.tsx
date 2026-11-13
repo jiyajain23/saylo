@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { getSession } from "../../lib/api";
+import { getSession, endSession } from "../../lib/api";
 import Link from "next/link";
 import {
   CheckCircle2,
@@ -27,17 +27,43 @@ const DONE_STATUSES = new Set(["READY", "FAILED"]);
 
 // ─── LangGraph Pipeline Visualizer ────────────────────────────────────────────
 
-function AnalysisPipeline() {
+const PIPELINE_STAGES = [
+  ["speech", "Speech", "Measuring pace, pauses, fillers, and delivery."],
+  ["nlp", "Language", "Scoring clarity, structure, and relevance."],
+  ["alignment", "Alignment", "Checking scenario-specific answer signals."],
+  ["voice", "Voice", "Analyzing vocal energy and confidence."],
+  ["emotion", "Emotion", "Estimating emotional tone from the transcript."],
+  ["vision", "Vision", "Reviewing available posture and eye-contact metrics."],
+  ["aggregator", "Score", "Combining the measured dimensions."],
+  ["insights", "Coaching", "Generating personalized feedback."],
+  ["jobs", "Job Match", "Matching the session context to relevant roles."],
+  ["template_store", "Finalize", "Saving the completed analysis."],
+] as const;
+
+function AnalysisPipeline({ progress }: { progress?: { events?: Array<{ stage: string; status: string; error?: string }> } | null }) {
+  const latest = new Map((progress?.events ?? []).map(event => [event.stage, event]));
+  const completed = PIPELINE_STAGES.filter(([id]) => latest.get(id)?.status === "completed").length;
   return (
     <section className="card analysis-loading" role="status" aria-live="polite">
       <h2>Analyzing your performance</h2>
       <p style={{ margin: "0.5rem auto 0", color: "var(--muted)", fontSize: "0.875rem" }}>
-        Your session is being reviewed. Insights will appear here automatically when the analysis is ready.
+        {completed} of {PIPELINE_STAGES.length} stages complete. Parallel measurement stages may finish in any order.
       </p>
-      <div className="analysis-stages" aria-label="Areas included in your analysis">
-        {["Speech", "Language", "Alignment", "Voice", "Emotion", "Vision", "Insights", "Jobs", "Templates"].map(label => (
-          <span className="badge badge-slate" key={label}>{label}</span>
-        ))}
+      <div className="analysis-stages" aria-label="Live analysis pipeline" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: "0.65rem", marginTop: "1rem" }}>
+        {PIPELINE_STAGES.map(([id, label, description]) => {
+          const event = latest.get(id);
+          const status = event?.status ?? "pending";
+          const color = status === "completed" ? "var(--emerald)" : status === "running" ? "var(--accent)" : status === "failed" ? "#b54747" : "var(--muted)";
+          return (
+            <div key={id} aria-label={`${label}: ${status}`} style={{ border: `1px solid ${color}`, borderRadius: "var(--radius-md)", padding: "0.7rem", textAlign: "left", color, opacity: status === "pending" ? 0.65 : 1, boxShadow: status === "running" ? "0 0 16px rgba(41,110,145,.25)" : "none", transition: "all .25s ease" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 700 }}>
+                <span>{status === "completed" ? "✓ " : status === "failed" ? "! " : status === "running" ? "◌ " : "○ "}{label}</span>
+                <span style={{ fontSize: "0.7rem", textTransform: "uppercase" }}>{status}</span>
+              </div>
+              <div style={{ marginTop: "0.3rem", color: "var(--muted)", fontSize: "0.72rem" }}>{event?.error || description}</div>
+            </div>
+          );
+        })}
       </div>
     </section>
   );
@@ -93,6 +119,7 @@ export default function InsightsPage() {
   const [hasReadUrl, setHasReadUrl] = useState(false);
   const [data, setData] = useState<any | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [retrying, setRetrying] = useState(false);
 
   useEffect(() => {
     const sp = new URLSearchParams(window.location.search);
@@ -103,29 +130,27 @@ export default function InsightsPage() {
   useEffect(() => {
     if (!sessionId) return;
     let alive = true;
-    let intervalId: any = null;
+    let intervalId: ReturnType<typeof setTimeout> | null = null;
 
     const load = async () => {
       try {
         const res = await getSession(sessionId);
         if (!alive) return;
         setData(res.session);
-        if (DONE_STATUSES.has(res.session?.status) && intervalId !== null) {
-          clearInterval(intervalId);
-          intervalId = null;
+        if (!DONE_STATUSES.has(res.session?.status)) {
+          intervalId = setTimeout(load, 5000);
         }
       } catch {
         if (!alive) return;
         setError("Failed to load session.");
-        if (intervalId !== null) clearInterval(intervalId);
+        if (intervalId !== null) clearTimeout(intervalId);
       }
     };
 
     load();
-    intervalId = setInterval(load, 2500);
     return () => {
       alive = false;
-      if (intervalId) clearInterval(intervalId);
+      if (intervalId) clearTimeout(intervalId);
     };
   }, [sessionId]);
 
@@ -155,7 +180,30 @@ export default function InsightsPage() {
         )}
       </div>
 
-      {data.status === "ANALYZING" && <AnalysisPipeline />}
+      {data.status === "ANALYZING" && <AnalysisPipeline progress={data.analysisJob?.progress} />}
+      {data.analysisJob && data.status === "ANALYZING" && (
+        <p role="status" style={{ color: "var(--muted)" }}>
+          {data.analysisJob.status === "UPLOADING" ? "Saving private audio. Analysis starts after the upload is confirmed."
+            : data.analysisJob.status === "QUEUED" ? "Queued for the analysis worker. You can leave this page and return later."
+            : "The analysis worker is processing your session."}
+          {data.analysisJob.errorCode && " A previous attempt failed; a bounded retry is pending."}
+        </p>
+      )}
+      {data.status === "FAILED" && (
+        <p role="alert">This session could not be completed ({data.failureCode || "analysis_failed"}).
+          Your saved transcript remains available. No successful analysis is claimed.</p>
+      )}
+      {(data.status === "ENDED" || data.analysisJob?.status === "UPLOADING") && (
+        <button className="btn btn-primary" disabled={retrying} onClick={async () => {
+          setRetrying(true);
+          try {
+            await endSession(sessionId);
+            setData((await getSession(sessionId)).session);
+          } catch (error) {
+            setError(error instanceof Error ? error.message : "Completion could not be retried.");
+          } finally { setRetrying(false); }
+        }}>{retrying ? "Saving session…" : "Retry End & Analyze"}</button>
+      )}
 
       {analysis && (
         <div style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}>

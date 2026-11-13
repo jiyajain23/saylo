@@ -9,8 +9,10 @@
     "dev:clean": "npx kill-port 3000 5000 8000 || exit 0",
     "dev:clean:ps": "powershell -NoProfile -Command \"try{npx kill-port 3000 5000 8000}catch{}\"",
     "dev:all": "npm-run-all -s dev:clean dev",
-    "dev": "npm-run-all -p dev:api dev:web",
-    "dev:api": "cd backend && uvicorn main:app --host 0.0.0.0 --port 5000 --reload",
+    "dev": "dev.bat",
+    "dev:api": "cd backend && venv/Scripts/python.exe -m uvicorn main:app --host 0.0.0.0 --port 5000 --reload",
+    "dev:worker": "cd backend && venv/Scripts/python.exe worker.py",
+    "dev:analysis": "cd services/analysis-service && venv/Scripts/python.exe -m uvicorn app:app --host 0.0.0.0 --port 8000 --reload",
     "dev:web": "npm --workspace @speakez-JJ/frontend run dev",
     "build:web": "npm --workspace @speakez-JJ/frontend run build",
     "lint:web": "npm --workspace @speakez-JJ/frontend run lint"

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import re
 import logging
-from functools import lru_cache
 from typing import Any, Dict, List, Tuple
 
 import numpy as np
@@ -67,20 +66,12 @@ SCENARIO_SIGNAL_NOTES: Dict[str, Dict[str, str]] = {
 _SIM_THRESHOLD = 0.42   # cosine similarity ≥ this = signal present
 
 
-@lru_cache(maxsize=1)
 def _get_model():
-    try:
-        import sentence_transformers
-        st_cls = getattr(sentence_transformers, "SentenceTransformer", None)
-        if not callable(st_cls):
-            from sentence_transformers.SentenceTransformer import SentenceTransformer as st_cls
-        logger.info("[alignment] loading MiniLM model for semantic signal detection")
-        model = st_cls("all-MiniLM-L6-v2")
-        return model
-    except Exception as exc:
-        logger.warning("[alignment] could not load model: %s", exc)
-        return None
+    from modules.model_registry import sentence_model
+    return sentence_model()
 
+
+from functools import lru_cache
 
 @lru_cache(maxsize=32)
 def _embed_signal_descriptions(scenario: str):

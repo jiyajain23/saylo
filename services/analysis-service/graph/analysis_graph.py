@@ -21,6 +21,8 @@ All fan-out nodes run in parallel via LangGraph's async execution.
 from __future__ import annotations
 
 import logging
+import contextvars
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from langgraph.graph import StateGraph, START, END  # type: ignore
@@ -40,6 +42,34 @@ from graph.nodes import (
 )
 
 logger = logging.getLogger(__name__)
+_progress_sink = contextvars.ContextVar("analysis_progress_sink", default=None)
+
+
+def _emit(stage: str, status: str, error: str | None = None) -> None:
+    sink = _progress_sink.get()
+    if sink is None:
+        return
+    event = {"stage": stage, "status": status,
+             "timestamp": datetime.now(timezone.utc).isoformat()}
+    if error:
+        event["error"] = error
+    try:
+        sink(event)
+    except Exception:
+        logger.debug("[graph] progress sink failed", exc_info=True)
+
+
+def _instrument(name, node):
+    def wrapped(state):
+        _emit(name, "running")
+        try:
+            result = node(state)
+            _emit(name, "completed")
+            return result
+        except Exception as exc:
+            _emit(name, "failed", type(exc).__name__)
+            raise
+    return wrapped
 
 # ── Build graph ────────────────────────────────────────────────────────────────
 
@@ -47,16 +77,12 @@ def _build_graph():
     builder = StateGraph(AnalysisState)
 
     # Register all nodes
-    builder.add_node("speech", speech_node)
-    builder.add_node("nlp", nlp_node)
-    builder.add_node("alignment", alignment_node)
-    builder.add_node("voice", voice_node)
-    builder.add_node("emotion", emotion_node)
-    builder.add_node("vision", vision_node)
-    builder.add_node("aggregator", aggregator_node)
-    builder.add_node("insights", insights_node)
-    builder.add_node("jobs", jobs_node)
-    builder.add_node("template_store", template_store_node)
+    nodes = {"speech": speech_node, "nlp": nlp_node, "alignment": alignment_node,
+             "voice": voice_node, "emotion": emotion_node, "vision": vision_node,
+             "aggregator": aggregator_node, "insights": insights_node,
+             "jobs": jobs_node, "template_store": template_store_node}
+    for name, node in nodes.items():
+        builder.add_node(name, _instrument(name, node))
 
     # Fan-out: START → all parallel analysis nodes
     for node in ("speech", "nlp", "alignment", "voice", "emotion", "vision"):
@@ -88,6 +114,7 @@ def run_analysis(
     audio_b64: Optional[str] = None,
     audio_sample_rate: int = 16000,
     video_frames_b64: Optional[List[str]] = None,
+    progress_callback=None,
 ) -> AnalysisState:
     """
     Run the full analysis pipeline and return the final state.
@@ -127,7 +154,17 @@ def run_analysis(
         bool(video_frames_b64),
     )
 
-    final_state: AnalysisState = _graph.invoke(initial_state)
+    token = _progress_sink.set(progress_callback)
+    _emit("analysis", "started")
+    try:
+        try:
+            final_state: AnalysisState = _graph.invoke(initial_state)
+        except Exception as exc:
+            _emit("analysis", "failed", type(exc).__name__)
+            raise
+        _emit("analysis", "completed")
+    finally:
+        _progress_sink.reset(token)
 
     errors = final_state.get("errors", [])
     if errors:

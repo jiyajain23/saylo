@@ -59,6 +59,9 @@ model/
 training_args.bin
 PHASE1_REPORT.MD
 PHASE2_REPORT.MD
+Phase3_report.md
+phase4_report.md
 SUPABASE_SETUP.MD
 PLAN.MD
 .gitignore
+CLEANUP_AND_PIPELINE_REPORT.md

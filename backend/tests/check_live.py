@@ -1,6 +1,6 @@
 """Validate the configured Live model/setup without sending text or audio.
 
-Run from backend: python check_live.py
+Run from backend: python -m tests.check_live
 This opens and closes one upstream session; it never sends a generation request.
 Errors are reduced to a code so credential-bearing URLs cannot reach output.
 """

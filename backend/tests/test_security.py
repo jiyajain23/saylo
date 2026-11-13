@@ -163,7 +163,7 @@ class OwnershipTests(unittest.IsolatedAsyncioTestCase):
     async def test_wrong_owner_cannot_write_end_or_drain_other_socket(self):
         self.login()
         with patch.object(sessions.completion, "drain", AsyncMock()) as drain, \
-             patch.object(sessions, "_run_analysis_task", AsyncMock()) as analysis:
+             patch.object(sessions, "enqueue", AsyncMock()) as analysis:
             for session_id in ("bob", "legacy"):
                 self.assertEqual((await self.client.post(f"/sessions/{session_id}/segments", json={"speaker": "user", "text": "injected"})).status_code, 404)
                 self.assertEqual((await self.client.post(f"/sessions/{session_id}/end", json={})).status_code, 404)
@@ -172,6 +172,9 @@ class OwnershipTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_create_derives_owner_and_response_contract_is_preserved(self):
         self.login()
+        async with self.factory() as db:
+            (await db.get(Session, "alice")).status = "ENDED"
+            await db.commit()
         response = await self.client.post("/sessions/", json={"scenario": "PITCH", "userId": BOB})
         self.assertEqual(response.status_code, 201)
         result = response.json()["session"]

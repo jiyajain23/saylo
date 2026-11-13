@@ -9,7 +9,7 @@ import enum
 from datetime import datetime
 from typing import Any, Optional
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import (
     JSON,
     DateTime,
@@ -81,6 +81,9 @@ class Session(Base):
 
     contextRaw: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     contextJson: Mapped[Optional[Any]] = mapped_column(JSON, nullable=True)
+    audioBytes: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    liveHeartbeatAt: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    failureCode: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
     segments: Mapped[list["TranscriptSegment"]] = relationship(
         "TranscriptSegment", back_populates="session", cascade="all, delete-orphan"
@@ -132,16 +135,44 @@ class AnalysisResult(Base):
 
 # ── Pydantic request/response schemas ──────────────────────────────────────────
 
+class AnalysisJob(Base):
+    __tablename__ = "AnalysisJob"
+    __table_args__ = (Index("ix_job_status_available", "status", "availableAt"),
+                     Index("ix_job_owner_created", "userId", "createdAt"))
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    sessionId: Mapped[str] = mapped_column(String, ForeignKey("Session.id", ondelete="CASCADE"), unique=True)
+    userId: Mapped[str] = mapped_column(OWNER_ID, ForeignKey("User.id", ondelete="CASCADE"))
+    status: Mapped[str] = mapped_column(String, default="QUEUED")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    createdAt: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updatedAt: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    availableAt: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    expiresAt: Mapped[datetime] = mapped_column(DateTime)
+    leaseToken: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    leaseExpiresAt: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    heartbeatAt: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    audioKey: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    audioBytes: Mapped[int] = mapped_column(Integer, default=0)
+    audioDeletedAt: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    errorCode: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    progress: Mapped[Optional[Any]] = mapped_column(JSON, nullable=True)
+
 class CreateSessionRequest(BaseModel):
     scenario: str = "INTERVIEW"
     persona: str = "DEFAULT"
     pressureLevel: int = 0
-    title: Optional[str] = None
-    contextText: Optional[str] = None
-    resumeText: Optional[str] = None
-    jobDescription: Optional[str] = None
-    topicNotes: Optional[str] = None
-    freeText: Optional[str] = None
+    title: Optional[str] = Field(default=None, max_length=120)
+    contextText: Optional[str] = Field(default=None, max_length=32000)
+    resumeText: Optional[str] = Field(default=None, max_length=32000)
+    jobDescription: Optional[str] = Field(default=None, max_length=32000)
+    topicNotes: Optional[str] = Field(default=None, max_length=32000)
+    freeText: Optional[str] = Field(default=None, max_length=32000)
+
+    @model_validator(mode="after")
+    def bounded_context(self):
+        if sum(len(getattr(self, key) or "") for key in ("contextText", "resumeText", "jobDescription", "topicNotes", "freeText")) > 64000:
+            raise ValueError("combined context exceeds 64000 characters")
+        return self
 
     @field_validator("pressureLevel")
     @classmethod

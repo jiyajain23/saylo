@@ -54,6 +54,14 @@ test('JWT is sent only in hello, never in the WebSocket URL or media messages', 
   assert.equal(socket.sent.at(-1).accessToken, undefined);
 });
 
+test('slow transport closes instead of silently dropping recorded audio', () => {
+  const { socket, client } = setup();
+  socket.bufferedAmount = 2 * 1024 * 1024;
+  client.sendAudioChunk('AAA=');
+  assert.equal(socket.readyState, 3);
+  assert.equal(socket.sent.filter(message => message.type === 'audio_chunk').length, 0);
+});
+
 test('disconnect rejects pending completion', async () => {
   const { socket, client } = setup();
   const result = client.finishAudio(200);

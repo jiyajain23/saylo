@@ -17,7 +17,7 @@ import time
 from typing import Optional
 
 from fastapi import HTTPException, WebSocket, WebSocketDisconnect
-from sqlalchemy import select
+from sqlalchemy import select, update, func
 
 from db import AsyncSessionLocal
 from models.schemas import Session, TranscriptSegment
@@ -26,6 +26,8 @@ from services.scenarios import normalize_persona, normalize_pressure_level
 from services import completion
 from services.auth import verify_access_token
 from services.origins import allowed_origins
+from services.limits import SESSION_SECONDS, MAX_WS_BYTES, MAX_TRANSCRIPT_CHARS
+from services.storage import AudioStorage
 from datetime import datetime
 from utils.audio import audio_buffer_store
 from utils.logger import logger
@@ -121,11 +123,25 @@ async def websocket_endpoint(ws: WebSocket) -> None:
         if not isinstance(session_id, str):
             raise ValueError()
         async with AsyncSessionLocal() as db:
-            owned = await db.scalar(select(Session.id).where(Session.id == session_id, Session.userId == principal.id))
-        if not owned:
+            owned = await db.scalar(select(Session).where(Session.id == session_id, Session.userId == principal.id))
+        if not owned or owned.status != "LIVE":
             raise ValueError()
-    except (TimeoutError, ValueError, HTTPException, WebSocketDisconnect, TypeError):
+    except (TimeoutError, ValueError, HTTPException, WebSocketDisconnect, TypeError) as auth_err:
+        logger.warn(f"[ws] handshake failed: {type(auth_err).__name__}: {auth_err}")
         await _send(ws, {"type": "error", "message": "authentication_failed"})
+        await ws.close(code=1008)
+        return
+
+    deadline = time.monotonic() + max(0, SESSION_SECONDS - (datetime.utcnow() - owned.createdAt).total_seconds())
+    last_heartbeat = 0.0
+    storage_ready = False
+    rate_start, audio_rate_count, control_rate_count = time.monotonic(), 0, 0
+    total_text = 0
+    async with AsyncSessionLocal() as db:
+        total_text = await db.scalar(select(func.coalesce(func.sum(func.length(TranscriptSegment.text)), 0))
+                                     .where(TranscriptSegment.sessionId == session_id))
+    if not completion.bind(session_id):
+        await _send(ws, {"type": "error", "message": "live_connection_limit"})
         await ws.close(code=1008)
         return
 
@@ -141,6 +157,14 @@ async def websocket_endpoint(ws: WebSocket) -> None:
     finish_lock = asyncio.Lock()
     transcript_lock = asyncio.Lock()
     flush_transcript = None
+    transcript_failed = False
+
+    def reserve_text(text):
+        nonlocal total_text, transcript_failed
+        if total_text + len(text) > MAX_TRANSCRIPT_CHARS:
+            transcript_failed = True
+            raise ValueError("transcript_limit")
+        total_text += len(text)
 
     async def finish_connection() -> None:
         nonlocal finishing, finished
@@ -151,8 +175,12 @@ async def websocket_endpoint(ws: WebSocket) -> None:
             started_at = time.monotonic()
             logger.info("[ws] finalization started", {"sessionId": bound_session_id})
             try:
+                if transcript_failed:
+                    raise RuntimeError("transcript_limit")
                 if live_session:
                     await live_session.finish_input()
+                if transcript_failed:
+                    raise RuntimeError("transcript_limit")
                 if flush_transcript:
                     await flush_transcript()
                 finished = True
@@ -170,6 +198,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                 raise
 
     await _send(ws, {"type": "ready"})
+    completion.register(session_id, finish_connection)
 
     async def close_live_session() -> None:
         nonlocal live_session, ai_text_buffer, user_audio_text_buffer
@@ -205,6 +234,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
 
         def on_input_text(text: str) -> None:
             nonlocal user_audio_text_buffer
+            reserve_text(text)
             user_audio_text_buffer += text
 
         def on_input_timing(timing: dict) -> None:
@@ -217,7 +247,9 @@ async def websocket_endpoint(ws: WebSocket) -> None:
 
         def on_text(text: str) -> None:
             nonlocal ai_text_buffer
-            ai_text_buffer += _transcript_delta(ai_text_buffer, text)
+            delta = _transcript_delta(ai_text_buffer, text)
+            reserve_text(delta)
+            ai_text_buffer += delta
 
         async def on_audio(audio: dict) -> None:
             await _send(ws, {"type": "ai_audio", "data": audio["data"], "mimeType": audio["mimeType"]})
@@ -275,18 +307,42 @@ async def websocket_endpoint(ws: WebSocket) -> None:
 
     try:
         while True:
+            now = time.monotonic()
+            if now - last_heartbeat >= 15:
+                async with AsyncSessionLocal() as db:
+                    await db.execute(update(Session).where(Session.id == bound_session_id, Session.userId == principal.id,
+                        Session.status == "LIVE").values(liveHeartbeatAt=datetime.utcnow()))
+                    await db.commit()
+                last_heartbeat = now
+            if now >= deadline and not finished:
+                # End the same way as the button; do not silently cut off final ASR.
+                await finish_connection()
+                from api.sessions import end_session
+                async with AsyncSessionLocal() as db:
+                    await end_session(bound_session_id, db, principal)
+                await _send(ws, {"type": "session_ended"})
+                await ws.close(code=1000)
+                break
             try:
-                raw = await asyncio.wait_for(ws.receive_text(), timeout=max(.01, principal.expires_at - time.time()))
+                raw = await asyncio.wait_for(ws.receive_text(), timeout=max(.01, min(15, principal.expires_at - time.time(),
+                    deadline - time.monotonic() if not finished else 15)))
             except WebSocketDisconnect:
                 break
             except TimeoutError:
-                await _send(ws, {"type": "error", "message": "access_token_expired"})
-                await ws.close(code=1008)
-                break
+                if principal.expires_at <= time.time():
+                    await _send(ws, {"type": "error", "message": "access_token_expired"})
+                    await ws.close(code=1008)
+                    break
+                if finished and time.monotonic() > deadline + 120:
+                    break
+                continue
             if principal.expires_at <= time.time():
                 await ws.close(code=1008)
                 break
-
+            if len(raw.encode("utf-8")) > MAX_WS_BYTES:
+                await _send(ws, {"type": "error", "message": "payload_too_large"})
+                await ws.close(code=1009)
+                break
             try:
                 parsed = json.loads(raw)
             except json.JSONDecodeError:
@@ -299,6 +355,24 @@ async def websocket_endpoint(ws: WebSocket) -> None:
 
             msg_type = parsed.get("type")
             session_id = parsed.get("sessionId", "")
+
+            # AudioWorklet/ScriptProcessor cadence varies by browser and can
+            # exceed 100 messages/sec. Bound media and control traffic
+            # separately; the audio byte cap remains the primary resource limit.
+            if time.monotonic() - rate_start >= 1:
+                rate_start, audio_rate_count, control_rate_count = time.monotonic(), 0, 0
+            if msg_type == "audio_chunk":
+                audio_rate_count += 1
+                if audio_rate_count > 600:
+                    await _send(ws, {"type": "error", "message": "message_rate_limit"})
+                    await ws.close(code=1008)
+                    break
+            else:
+                control_rate_count += 1
+                if control_rate_count > 40:
+                    await _send(ws, {"type": "error", "message": "message_rate_limit"})
+                    await ws.close(code=1008)
+                    break
 
             # ── hello: bind session ──
             if msg_type == "hello":
@@ -336,7 +410,20 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                 if msg_type == "audio_chunk":
                     data = parsed.get("data", "")
                     mime = parsed.get("mimeType", "audio/pcm;rate=16000")
-                    audio_buffer_store.append(session_id, data)
+                    if mime != "audio/pcm;rate=16000":
+                        raise ValueError("unsupported_audio_format")
+                    if not storage_ready:
+                        await AudioStorage().check_private()
+                        storage_ready = True
+                    first_audio = audio_buffer_store.size(session_id) == 0
+                    size = audio_buffer_store.append(session_id, data)
+                    if first_audio:
+                        # Durable marker prevents text-only success after a crash
+                        # loses the gateway's temporary recording.
+                        async with AsyncSessionLocal() as db:
+                            await db.execute(update(Session).where(Session.id == session_id, Session.userId == principal.id)
+                                             .values(audioBytes=size))
+                            await db.commit()
                     await session.send_audio(data, mime)
 
                 elif msg_type == "audio_end":
@@ -354,6 +441,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                     # The UI's opening instruction is control input, not a
                     # candidate answer. Legacy messages still default to answers.
                     if not parsed.get("isControl", False):
+                        reserve_text(text)
                         nudge = _send_live_nudges_sync(text, stats)
                         if nudge:
                             await _send(ws, nudge)
@@ -366,8 +454,10 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                     await session.send_text(text)
 
             except Exception as e:
-                logger.error("[ws] message handler error", {"errorType": type(e).__name__})
+                logger.error(f"[ws] message handler error: {type(e).__name__}: {e}")
                 await _send(ws, {"type": "error", "message": "live_session_failed"})
+                await ws.close(code=1011)
+                break
 
     finally:
         async with finish_lock:
@@ -378,7 +468,16 @@ async def websocket_endpoint(ws: WebSocket) -> None:
             try:
                 if flush_transcript:
                     await flush_transcript()
-                finished = True
             finally:
                 if bound_session_id:
                     completion.unregister(bound_session_id, finish_connection)
+                    completion.release(bound_session_id)
+                    async with AsyncSessionLocal() as db:
+                        await db.execute(update(Session).where(Session.id == bound_session_id, Session.userId == principal.id,
+                            Session.status == "LIVE").values(status="ENDED" if finished else "FAILED",
+                            failureCode=None if finished else "live_connection_interrupted"))
+                        await db.commit()
+                    if finished:
+                        audio_buffer_store.seal(bound_session_id)
+                    else:
+                        audio_buffer_store.clear(bound_session_id)

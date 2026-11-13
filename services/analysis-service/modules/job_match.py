@@ -42,19 +42,9 @@ JOB_CATALOGUE: Dict[str, str] = {
 }
 
 
-@lru_cache(maxsize=1)
 def _get_model():
-    try:
-        import sentence_transformers
-        st_cls = getattr(sentence_transformers, "SentenceTransformer", None)
-        if not callable(st_cls):
-            from sentence_transformers.SentenceTransformer import SentenceTransformer as st_cls
-        logger.info("[job-match] loading sentence-transformer model")
-        model = st_cls("all-MiniLM-L6-v2")
-        return model
-    except Exception as exc:
-        logger.warning("[job-match] could not load model: %s", exc)
-        return None
+    from modules.model_registry import sentence_model
+    return sentence_model()
 
 
 @lru_cache(maxsize=1)

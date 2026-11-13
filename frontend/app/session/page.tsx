@@ -90,6 +90,7 @@ export default function LiveSessionPage() {
   const nudgeIdRef = useRef(0);
   const nudgeCooldownRef = useRef<Record<string, number>>({});  // category → last-fired timestamp
   const [status, setStatus] = useState<"setup" | "live" | "ending">("setup");
+  const [isStarting, setIsStarting] = useState(false);
   const [isStreamingMic, setIsStreamingMic] = useState(false);
   const [isStreamingVideo, setIsStreamingVideo] = useState(false);
   const [visionMetrics, setVisionMetrics] = useState<VisionMetrics | null>(null);
@@ -314,6 +315,8 @@ export default function LiveSessionPage() {
   }
 
   async function start() {
+    if (isStarting || status !== "setup") return;
+    setIsStarting(true);
     try {
       const sc = SCENARIOS.find((x) => x.id === scenario)!;
       const accessToken = await getAccessToken(20 * 60);
@@ -333,6 +336,15 @@ export default function LiveSessionPage() {
         onAi: (text) => setTurns((t) => [...t, { speaker: "ai", text }]),
         onUserTranscript: (text) => setTurns((t) => [...t, { speaker: "user", text }]),
         onAiAudio: (audio) => playPcmAudio(audio.data, audio.mimeType),
+        onEnded: () => {
+          stopMicStream(false); stopVideoStream();
+          if (timerRef.current) clearInterval(timerRef.current);
+          window.location.href = `/insights?sessionId=${encodeURIComponent(session.id)}`;
+        },
+        onDisconnected: () => {
+          stopMicStream(false); stopVideoStream();
+          if (timerRef.current) clearInterval(timerRef.current);
+        },
       onNudge: (n: any) => { const id = ++nudgeIdRef.current; setNudges(x => [{ id, level: n.level ?? "info", category: n.category ?? "system", message: n.message ?? "", ts: Date.now() }, ...x].slice(0, 6)); setTimeout(() => setNudges(p => p.filter(x => x.id !== id)), 12000); },
       onError: (msg: string) => { const id = ++nudgeIdRef.current; setNudges(x => [{ id, level: "warn" as const, category: "error", message: msg, ts: Date.now() }, ...x].slice(0, 6)); setTimeout(() => setNudges(p => p.filter(x => x.id !== id)), 12000); }
       });
@@ -343,6 +355,7 @@ export default function LiveSessionPage() {
       const id = ++nudgeIdRef.current;
       setNudges([{ id, level: "warn" as const, category: "error", message: e instanceof Error ? e.message : "Failed to start session.", ts: Date.now() }]);
       setStatus("setup");
+      setIsStarting(false);
     }
   }
 
@@ -492,10 +505,15 @@ export default function LiveSessionPage() {
           </div>
         </div>
         <div>
-          <button onClick={start} className="btn btn-primary" style={{ padding: "0.6rem 1.4rem" }}>
-            <span>Start {sc.label} Practice</span>
+          <button onClick={start} disabled={isStarting} className="btn btn-primary" style={{ padding: "0.6rem 1.4rem" }}>
+            <span>{isStarting ? "Starting session…" : `Start ${sc.label} Practice`}</span>
             <ArrowRight size={14} />
           </button>
+          <p style={{ color: "var(--muted)", fontSize: "0.8125rem", marginTop: "0.75rem" }}>
+            Sessions last up to 15 minutes. Using the microphone sends audio to Gemini for live coaching
+            and saves a private recording for speech analysis. Recordings are scheduled for deletion
+            after analysis or after 24 hours; service outages can delay deletion.
+          </p>
         </div>
       </div>
     </div>

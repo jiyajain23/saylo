@@ -9,7 +9,7 @@ function load(path, context) {
   const source = ts.transpileModule(fs.readFileSync(path, 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
   }).outputText;
-  vm.runInNewContext(source, { exports, Date, ...context });
+  vm.runInNewContext(source, { exports, Date, AbortSignal, ...context });
   return exports;
 }
 

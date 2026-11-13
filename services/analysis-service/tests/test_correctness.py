@@ -9,6 +9,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from modules.speech import analyze_speech
 from modules import nlp, voice_emotion
+from modules import alignment, job_match
+from modules import model_registry
 from modules.transcript import measured_duration
 from modules.insights import _build_prompt
 from graph import nodes
@@ -16,6 +18,13 @@ from graph.analysis_graph import run_analysis
 
 
 class SpeechTests(unittest.TestCase):
+    def test_sentence_model_is_shared_across_analysis_modules(self):
+        marker = object()
+        with patch.object(model_registry, "sentence_model", return_value=marker):
+            self.assertIs(nlp._get_model(), marker)
+            self.assertIs(alignment._get_model(), marker)
+            self.assertIs(job_match._get_model(), marker)
+
     def test_timing_union_and_partially_timed_text(self):
         transcript = [{"speaker": "user", "text": "a", "audioStartSeconds": 0, "audioEndSeconds": 4},
                       {"speaker": "user", "text": "b", "audioStartSeconds": 3, "audioEndSeconds": 6},
@@ -93,6 +102,7 @@ class GraphTests(unittest.TestCase):
         self.assertEqual(result["nlp"]["score"], .5)
 
     def test_parallel_failures_preserve_siblings_and_errors(self):
+        events = []
         with patch.object(nodes, "analyze_speech", side_effect=ValueError("speech fixture")), \
              patch.object(nodes, "analyze_alignment", side_effect=ValueError("alignment fixture")), \
              patch.object(nodes, "analyze_emotion", return_value={"available": False}), \
@@ -100,10 +110,13 @@ class GraphTests(unittest.TestCase):
              patch.object(nodes, "generate_insights", return_value={}), \
              patch.object(nodes, "generate_job_recommendations", return_value=[]), \
              patch.object(nodes, "maybe_add_template"):
-            result = run_analysis("INTERVIEW", {}, [{"speaker": "user", "text": "my answer"}])
+            result = run_analysis("INTERVIEW", {}, [{"speaker": "user", "text": "my answer"}], progress_callback=events.append)
         self.assertEqual(len(result["errors"]), 2)
         self.assertEqual(result["nlp"]["score"], .8)
         self.assertIn("confidence", result)
+        self.assertEqual(events[0]["stage"], "analysis")
+        self.assertIn("speech", {event["stage"] for event in events})
+        self.assertEqual(events[-1]["status"], "completed")
 
 
 class VoiceTests(unittest.TestCase):

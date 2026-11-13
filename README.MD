@@ -265,7 +265,20 @@ NEXT_PUBLIC_WS_BASE=ws://localhost:5000/ws
 
 ---
 
-### 3. Launch Services (Three Terminals)
+### 3. Launch Services
+
+For local development on Windows, double-click `dev.bat` (or run `dev.bat` from
+the repository root). It opens three terminals: analysis service, frontend, and
+backend. The backend terminal runs both the gateway and durable worker:
+
+```powershell
+dev.bat
+```
+
+It starts the frontend, FastAPI gateway, LangGraph analysis service, and durable
+analysis worker together. The worker is required for queued analyses to finish.
+
+For manual troubleshooting, the equivalent processes are listed below.
 
 #### Terminal 1 — Analysis Microservice
 ```bash
@@ -289,7 +302,18 @@ python -c "import asyncio; from db import init_db; asyncio.run(init_db())"
 uvicorn main:app --host 0.0.0.0 --port 5000 --reload
 ```
 
-#### Terminal 3 — Frontend Web Application
+#### Terminal 3 — Durable Analysis Worker
+```bash
+cd backend
+# Activate the backend virtual environment first.
+python worker.py
+```
+
+The gateway records and queues analysis jobs; this worker claims them and
+persists results. If it is not running, sessions remain `ANALYZING` or `QUEUED`
+by design and analysis cannot finish.
+
+#### Terminal 4 — Frontend Web Application
 ```bash
 cd frontend
 npm install

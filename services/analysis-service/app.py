@@ -32,6 +32,8 @@ logger = logging.getLogger("analysis-service")
 
 # ── App ────────────────────────────────────────────────────────────────────────
 app = FastAPI(title="SpeakEZ Analysis Service", version="0.1.0")
+from request_limits import AnalysisRequestLimits
+app.add_middleware(AnalysisRequestLimits)
 
 # Request timeout: abort analysis if it runs longer than this (seconds).
 # Protects against model hangs on very large inputs.
@@ -53,7 +55,8 @@ app.include_router(analyze_router)
 
 @app.get("/health")
 async def health():
-    return {"ok": True}
+    from modules.model_registry import artifact_status
+    return {"ok": True, "models": artifact_status()}
 
 
 @app.on_event("startup")
@@ -72,11 +75,11 @@ async def on_startup() -> None:
 
 
 def _load_nlp_models() -> None:
-    """Load sentence-transformer and cross-encoder into lru_cache at startup."""
+    """Warm shared models sequentially so cold-start peak RSS is measurable."""
     try:
-        from modules.nlp import _get_model, _get_cross_encoder
-        _get_model()
-        _get_cross_encoder()
+        from modules.model_registry import sentence_model, cross_encoder
+        sentence_model()
+        cross_encoder()
         logger.info("[warmup] sentence-transformer + cross-encoder loaded")
     except Exception as exc:
         logger.warning("[warmup] NLP model load failed: %s", exc)

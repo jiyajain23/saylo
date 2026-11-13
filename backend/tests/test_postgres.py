@@ -38,6 +38,8 @@ class PostgreSQLTests(unittest.IsolatedAsyncioTestCase):
                 if not exists:
                     await self.conn.execute(text(f"CREATE ROLE {role} NOLOGIN"))
             await self.conn.execute(text("CREATE SCHEMA auth"))
+            await self.conn.execute(text("CREATE SCHEMA storage"))
+            await self.conn.execute(text("CREATE TABLE storage.buckets (id TEXT PRIMARY KEY, name TEXT, public BOOLEAN, file_size_limit BIGINT, allowed_mime_types TEXT[])"))
             await self.conn.execute(text("CREATE TABLE auth.users (id UUID PRIMARY KEY)"))
             await self.conn.execute(text("""CREATE FUNCTION auth.uid() RETURNS UUID LANGUAGE SQL STABLE AS
                 'SELECT nullif(current_setting(''request.jwt.claim.sub'', true), '''')::uuid'"""))

@@ -10,6 +10,8 @@ Run with:
 from __future__ import annotations
 
 import os
+import asyncio
+from contextlib import suppress
 
 from dotenv import load_dotenv
 
@@ -26,6 +28,8 @@ from api.sessions import router as sessions_router
 from api.websocket import websocket_endpoint
 from utils.logger import logger
 from services.origins import allowed_origins
+from services.body_limit import BodyLimitMiddleware
+from services.limits import MAX_HTTP_BYTES
 
 # ── Rate limiter ───────────────────────────────────────────────────────────────
 
@@ -34,7 +38,7 @@ limiter = Limiter(key_func=get_remote_address, default_limits=["300/15minutes"])
 # ── App ────────────────────────────────────────────────────────────────────────
 
 app = FastAPI(
-    title="SpeakEZ API",
+    title="saylo API",
     version="0.1.0",
     docs_url="/docs",
     redoc_url="/redoc",
@@ -46,6 +50,7 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 # ── CORS ───────────────────────────────────────────────────────────────────────
 
 _allowed_origins = allowed_origins()
+app.add_middleware(BodyLimitMiddleware, max_bytes=MAX_HTTP_BYTES)
 
 app.add_middleware(
     CORSMiddleware,
@@ -85,6 +90,21 @@ async def global_exception_handler(request: Request, exc: Exception):
 async def on_startup():
     from db import init_db
     await init_db()
+    from utils.audio import audio_buffer_store
+    audio_buffer_store.cleanup()
+    async def cleanup_audio():
+        while True:
+            await asyncio.sleep(60)
+            audio_buffer_store.cleanup()
+    app.state.audio_cleanup = asyncio.create_task(cleanup_audio())
     port = os.environ.get("PORT", "5000")
-    logger.info(f"[api] SpeakEZ Python backend starting on :{port}")
+    logger.info(f"[api] saylo Python backend starting on :{port}")
     logger.info("[api] Allowed CORS origins", _allowed_origins)
+
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    task = getattr(app.state, "audio_cleanup", None)
+    if task:
+        task.cancel()
+        with suppress(asyncio.CancelledError): await task

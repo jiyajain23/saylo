@@ -2,6 +2,7 @@ import { API_BASE } from "./api";
 
 type ServerMsg =
   | { type: "ready" }
+  | { type: "session_ended" }
   | { type: "user_text"; text: string }
   | { type: "ai_text"; text: string }
   | { type: "ai_audio"; data: string; mimeType: string }
@@ -17,6 +18,8 @@ export function openLiveSocket(args: {
   onAiAudio?: (audio: { data: string; mimeType: string }) => void;
   onNudge: (n: { level: "info" | "warn"; message: string }) => void;
   onError: (message: string) => void;
+  onEnded?: () => void;
+  onDisconnected?: () => void;
 }) {
   const url = new URL(API_BASE);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
@@ -24,6 +27,8 @@ export function openLiveSocket(args: {
 
   const ws = new WebSocket(url.toString());
   const pending: string[] = [];
+  let pendingBytes = 0;
+  let intentionalClose = false;
   let finishSequence = 0;
   let completion: { id: string; resolve: () => void; reject: (error: Error) => void;
     timer: ReturnType<typeof setTimeout>; promise: Promise<void> } | null = null;
@@ -37,10 +42,17 @@ export function openLiveSocket(args: {
 
   function sendRaw(payload: unknown) {
     const s = JSON.stringify(payload);
+    if (s.length + pendingBytes + (ws.bufferedAmount || 0) > 2 * 1024 * 1024) {
+      args.onError("Connection too slow. Recording stopped to avoid losing speech.");
+      rejectCompletion("Audio could not be delivered reliably.");
+      ws.close();
+      return false;
+    }
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(s);
     } else if (ws.readyState === WebSocket.CONNECTING) {
       pending.push(s);
+      pendingBytes += s.length;
     } else {
       return false;
     }
@@ -50,6 +62,7 @@ export function openLiveSocket(args: {
   ws.onopen = () => {
     sendRaw({ type: "hello", sessionId: args.sessionId, accessToken: args.accessToken });
     for (const msg of pending.splice(0, pending.length)) ws.send(msg);
+    pendingBytes = 0;
   };
 
   ws.onmessage = (evt) => {
@@ -74,6 +87,10 @@ export function openLiveSocket(args: {
     }
 
     if (msg.type === "user_text") args.onUserTranscript?.(msg.text);
+    if (msg.type === "session_ended") {
+      intentionalClose = true;
+      args.onEnded?.();
+    }
     if (msg.type === "ai_text") args.onAi(msg.text);
     if (msg.type === "ai_audio") args.onAiAudio?.({ data: msg.data, mimeType: msg.mimeType });
     if (msg.type === "nudge") args.onNudge({ level: msg.level, message: msg.message });
@@ -87,6 +104,11 @@ export function openLiveSocket(args: {
   };
   ws.onclose = () => {
     pending.length = 0;
+    pendingBytes = 0;
+    if (!intentionalClose) {
+      args.onError("Live connection closed. Check History for the saved transcript and session status.");
+      args.onDisconnected?.();
+    }
     rejectCompletion("Live connection closed. Your session has not been ended.");
   };
 
@@ -121,6 +143,7 @@ export function openLiveSocket(args: {
       sendRaw({ type: "video_frame", sessionId: args.sessionId, data, mimeType });
     },
     close() {
+      intentionalClose = true;
       ws.close();
     }
   };

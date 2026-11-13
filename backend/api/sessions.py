@@ -5,24 +5,21 @@ Handles CRUD for sessions, transcript segments, analysis triggering, and progres
 
 from __future__ import annotations
 
-import asyncio
-import os
 import re
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 import httpx
 from cuid2 import cuid_wrapper
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
-from pydantic import ValidationError
-from sqlalchemy import select, update
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from db import get_db
 from services.auth import Principal, current_user
 from models.schemas import (
-    AnalysisResult,
+    AnalysisJob,
     CreateSegmentRequest,
     CreateSessionRequest,
     Session,
@@ -39,6 +36,9 @@ from services.scenarios import (
 from utils.audio import audio_buffer_store
 from utils.logger import logger
 from services import completion
+from services.jobs import enqueue, mark_uploaded
+from services.limits import check_new_session, lock_owner, MAX_TRANSCRIPT_CHARS
+from services.storage import AudioStorage, StorageError
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
@@ -47,9 +47,6 @@ cuid_generate = cuid_wrapper()
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 SESSION_LIST_LIMIT = 100
-MAX_ANALYSIS_SEGMENTS = 120
-MAX_SEGMENT_CHARS = 2000
-ANALYSIS_TIMEOUT_S = int(os.environ.get("ANALYSIS_TIMEOUT_MS", "180000")) // 1000
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -237,6 +234,7 @@ async def create_session(body: CreateSessionRequest, db: AsyncSession = Depends(
     else:
         from sqlalchemy.dialects.sqlite import insert
     await db.execute(insert(User).values(id=user.id).on_conflict_do_nothing(index_elements=["id"]))
+    await check_new_session(db, user.id)
     session = Session(
         id=cuid_generate(),
         userId=user.id,
@@ -276,7 +274,15 @@ async def get_session(session_id: str, db: AsyncSession = Depends(get_db), user:
     session = result.scalar_one_or_none()
     if not session:
         raise HTTPException(status_code=404, detail="not_found")
-    return {"session": _session_to_dict(session, include_segments=True, include_analysis=True)}
+    detail = _session_to_dict(session, include_segments=True, include_analysis=True)
+    detail["failureCode"] = session.failureCode
+    job = await db.scalar(select(AnalysisJob).where(AnalysisJob.sessionId == session_id, AnalysisJob.userId == user.id))
+    if job:
+        detail["analysisJob"] = {"status": job.status, "attempts": job.attempts, "errorCode": job.errorCode,
+                                 "updatedAt": job.updatedAt.isoformat(),
+                                 "heartbeatAt": job.heartbeatAt.isoformat() if job.heartbeatAt else None,
+                                 "progress": job.progress}
+    return {"session": detail}
 
 
 @router.post("/{session_id}/segments", status_code=201)
@@ -292,6 +298,13 @@ async def add_segment(
     if not session:
         raise HTTPException(status_code=404, detail="not_found")
 
+    await lock_owner(db, user.id)
+    await db.refresh(session)
+    if session.status != "LIVE":
+        raise HTTPException(409, "session_not_live")
+    total = await db.scalar(select(func.coalesce(func.sum(func.length(TranscriptSegment.text)), 0)).where(TranscriptSegment.sessionId == session_id))
+    if total + len(body.text) > MAX_TRANSCRIPT_CHARS:
+        raise HTTPException(413, "transcript_limit")
     seg = TranscriptSegment(
         id=cuid_generate(),
         sessionId=session_id,
@@ -315,145 +328,44 @@ async def add_segment(
 
 @router.post("/{session_id}/end")
 async def end_session(session_id: str, db: AsyncSession = Depends(get_db), user: Principal = Depends(current_user)):
-    """
-    Mark the session as ANALYZING and kick off the analysis pipeline
-    as a fire-and-forget background coroutine.
-    """
-    result = await db.execute(
-        select(Session)
-        .options(selectinload(Session.segments))
-        .where(Session.id == session_id, Session.userId == user.id)
-    )
-    session = result.scalar_one_or_none()
-    if not session:
-        raise HTTPException(status_code=404, detail="not_found")
+    async with completion.end_lock(session_id):
+        return await _end_session(session_id, db, user)
 
+
+async def _end_session(session_id, db, user):
+    """Confirm final speech, stage private audio, and durably enqueue exactly once."""
+    session = await db.scalar(select(Session).where(Session.id == session_id, Session.userId == user.id))
+    if not session:
+        raise HTTPException(404, "not_found")
+    if session.status == "READY":
+        return {"ok": True}
+    existing = await db.scalar(select(AnalysisJob).where(AnalysisJob.sessionId == session_id, AnalysisJob.userId == user.id))
+    if existing and existing.status != "UPLOADING":
+        return {"ok": True}
+    # Do not hold a pool connection while Gemini callbacks need the database.
+    await db.commit()
     try:
         await completion.drain(session_id)
     except (TimeoutError, RuntimeError):
-        raise HTTPException(status_code=409, detail="final_turn_not_confirmed")
-    # Drain may have persisted late speech in another DB session. Refresh the
-    # relationship before capturing analysis input; ownership was checked first.
-    await db.refresh(session, attribute_names=["segments"])
-
-    # Atomic compare-and-set also covers simultaneous requests across workers.
-    claim = await db.execute(update(Session).where(
-        Session.id == session_id, Session.userId == user.id, Session.status.in_(["LIVE", "ENDED"])
-    ).values(status="ANALYZING", updatedAt=datetime.utcnow()))
-    if claim.rowcount != 1:
-        await db.rollback()
-        return {"ok": True}
-    await db.commit()
-
-    # Capture values needed by the background task before the session is detached
-    trimmed_transcript = [
-        {
-            "speaker": seg.speaker,
-            "text": seg.text,
-            "ts": seg.createdAt.isoformat(),
-            "audioStartSeconds": seg.audioStartSeconds,
-            "audioEndSeconds": seg.audioEndSeconds,
-        }
-        for seg in sorted(session.segments, key=lambda s: s.createdAt)
-    ]
-    context_json = session.contextJson or {}
-    scenario = session.scenario
-    audio_b64 = audio_buffer_store.pop(session_id)
-
-    asyncio.create_task(
-        _run_analysis_task(session_id, scenario, context_json, trimmed_transcript, audio_b64, user.id)
-    )
-
-    return {"ok": True}
-
-
-async def _run_analysis_task(
-    session_id: str,
-    scenario: str,
-    context: dict,
-    transcript: list[dict],
-    audio_b64: Optional[str],
-    user_id: str,
-) -> None:
-    """Background task: call the analysis service and persist results."""
-    from db import AsyncSessionLocal  # local import to avoid circular dep
-
-    base = os.environ.get("ANALYSIS_SERVICE_URL", "http://127.0.0.1:8000")
-    try:
-        service_token = os.environ.get("ANALYSIS_SERVICE_TOKEN", "")
-        if len(service_token) < 32:
-            raise RuntimeError("analysis_service_authentication_not_configured")
-        async with httpx.AsyncClient(timeout=ANALYSIS_TIMEOUT_S) as client:
-            resp = await client.post(
-                f"{base}/analyze",
-                headers={"Authorization": f"Bearer {service_token}"},
-                json={
-                    "scenario": scenario,
-                    "context": context,
-                    "transcript": transcript,
-                    "audio_b64": audio_b64,
-                },
-            )
-        if resp.status_code != 200:
-            raise RuntimeError(f"analysis_service_http_{resp.status_code}")
-
-        data = resp.json()
-
-        async with AsyncSessionLocal() as db:
-            owned = await db.scalar(select(Session.id).where(Session.id == session_id, Session.userId == user_id))
-            if not owned:
-                return  # Account/session deleted while inference was running.
-            # Upsert AnalysisResult
-            result = await db.execute(
-                select(AnalysisResult).join(Session).where(AnalysisResult.sessionId == session_id, Session.userId == user_id)
-            )
-            existing = result.scalar_one_or_none()
-
-            insights = data.get("insights", {})
-            fields = {
-                "speechMetrics": data.get("speech"),
-                "nlpMetrics": data.get("nlp"),
-                "alignment": data.get("alignment"),
-                "confidence": data.get("confidence"),
-                "highlights": insights.get("highlights"),
-                "strengths": insights.get("strengths"),
-                "weaknesses": insights.get("weaknesses"),
-                "suggestions": insights.get("suggestions"),
-                **{key: data.get(key) for key in (
-                    "voice", "emotion", "vision", "jobs", "errors", "insights", "scoring_version")},
-            }
-
-            if existing:
-                for k, v in fields.items():
-                    setattr(existing, k, v)
-            else:
-                ar = AnalysisResult(
-                    id=cuid_generate(),
-                    sessionId=session_id,
-                    **fields,
-                )
-                db.add(ar)
-
-            # Update session status → READY
-            session_result = await db.execute(select(Session).where(Session.id == session_id, Session.userId == user_id))
-            session = session_result.scalar_one_or_none()
-            if session:
-                session.status = "READY"
-                session.updatedAt = datetime.utcnow()
-
-            await db.commit()
-
-        logger.info("[analysis] completed", {"sessionId": session_id, "confidence": data.get("confidence")})
-
-    except Exception as e:
-        logger.error("[analysis] failed", {"sessionId": session_id, "errorType": type(e).__name__})
+        raise HTTPException(409, "final_turn_not_confirmed")
+    path = audio_buffer_store.seal(session_id)
+    size = audio_buffer_store.size(session_id)
+    storage = None
+    if path:
         try:
-            async with AsyncSessionLocal() as db:
-                result = await db.execute(select(Session).where(Session.id == session_id, Session.userId == user_id))
-                session = result.scalar_one_or_none()
-                if session:
-                    session.status = "FAILED"
-                    session.updatedAt = datetime.utcnow()
-                    await db.commit()
-        except Exception:
-            pass
+            storage = AudioStorage()
+            await storage.check_private()
+        except (StorageError, httpx.HTTPError):
+            raise HTTPException(503, "private_audio_storage_unavailable") from None
+    job = await enqueue(db, session_id, user.id, f"{user.id}/{session_id}.pcm" if path else None, size)
+    logger.info("[analysis] durable job saved", {"sessionId": session_id, "jobId": job.id, "status": job.status})
+    if job.status == "UPLOADING" and path:
+        try:
+            await storage.upload(job.audioKey, path, job.audioBytes)
+            await mark_uploaded(db, job.id)
+            audio_buffer_store.clear(session_id)
+        except (StorageError, httpx.HTTPError):
+            # Durable UPLOADING row lets a worker recover an uploaded object if
+            # the gateway dies between Storage success and QUEUED commit.
+            raise HTTPException(503, "audio_upload_pending_retry") from None
+    return {"ok": True}
