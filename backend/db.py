@@ -30,7 +30,15 @@ def database_settings(raw: str):
     query.pop("ssl", None)
     connect = {"server_settings": {"timezone": "UTC"}}
     if os.environ.get("DATABASE_SSL", "verify-full") != "disable":
-        connect["ssl"] = ssl.create_default_context(cafile=os.environ.get("DATABASE_SSL_CA_FILE") or None)
+        ca_candidate = os.environ.get("DATABASE_SSL_CA_FILE")
+        ca_path = None
+        if ca_candidate:
+            p = Path(ca_candidate)
+            if not p.is_absolute():
+                p = Path(__file__).resolve().parent / ca_candidate
+            if p.is_file():
+                ca_path = str(p)
+        connect["ssl"] = ssl.create_default_context(cafile=ca_path)
     elif url.host not in ("localhost", "127.0.0.1", "::1"):
         raise RuntimeError("DATABASE_SSL=disable is restricted to loopback test databases")
     pool_size = int(os.environ.get("DATABASE_POOL_SIZE", "2"))
