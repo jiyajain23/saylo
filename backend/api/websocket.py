@@ -455,7 +455,8 @@ async def websocket_endpoint(ws: WebSocket) -> None:
 
             except Exception as e:
                 logger.error(f"[ws] message handler error: {type(e).__name__}: {e}")
-                await _send(ws, {"type": "error", "message": "live_session_failed"})
+                err_msg = str(e) if str(e) else type(e).__name__
+                await _send(ws, {"type": "error", "message": f"live_session_failed: {err_msg}"})
                 await ws.close(code=1011)
                 break
 
