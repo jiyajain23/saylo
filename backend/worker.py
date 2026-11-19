@@ -60,7 +60,7 @@ async def infer(job):
     token = os.getenv("ANALYSIS_SERVICE_TOKEN", "")
     if len(token) < 32:
         raise ValueError("analysis_service_not_configured")
-    async with httpx.AsyncClient(timeout=httpx.Timeout(300, connect=15)) as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(300, connect=60)) as client:
         response = await client.post(os.getenv("ANALYSIS_SERVICE_URL", "http://localhost:8000").rstrip("/") + "/analyze",
                                      json=payload, headers={"Authorization": f"Bearer {token}"})
         response.raise_for_status()
