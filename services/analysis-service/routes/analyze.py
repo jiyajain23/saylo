@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from graph.analysis_graph import run_analysis
 from service_auth import require_gateway
+from modules.model_registry import _log_rss
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -75,6 +76,11 @@ async def analyze(req: AnalyzeRequest) -> Dict[str, Any]:
     loop = asyncio.get_event_loop()
     if _inference is not None and not _inference.done():
         raise HTTPException(503, "analysis_busy")
+    # Note: _inference is assigned AFTER the busy-check above, which is correct
+    # for single-worker deployments. The asyncio.shield() below ensures the CPU
+    # thread keeps running even if the client cancels, so models are not
+    # interrupted mid-inference.
+    _log_rss("[analyze] request start")
     try:
         def progress(event):
             if not req.job_id:

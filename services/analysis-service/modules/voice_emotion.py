@@ -13,8 +13,10 @@ from __future__ import annotations
 import base64
 import logging
 import os
-from functools import lru_cache
+import threading
 from typing import Any, Dict, List, Optional, Tuple
+
+from modules.model_registry import _log_rss
 
 # Suppress harmless HuggingFace symlink warning on Windows non-developer mode
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
@@ -25,50 +27,67 @@ MODEL_NAME = "audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim"
 MODEL_REVISION = "6eba34a2485ea31cb03600241787c3a5edab8626"
 TARGET_SR = 16000   # wav2vec2 expects 16kHz mono
 
+# ── Thread-safe singleton ──────────────────────────────────────────────────────
 
-@lru_cache(maxsize=1)
+_model_processor_lock = threading.Lock()
+_model_processor_instance = None   # tuple: (processor, model) | (None, None)
+_model_processor_loaded = False
+
+
 def _get_model_processor():
     """Use the publisher's EmotionModel, loading trunk and trained head together.
+
+    Thread-safe: uses double-checked locking so concurrent callers during the
+    first analysis request block rather than each loading the ~360 MB model.
 
     Source: https://huggingface.co/audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim
     Missing/mismatched weights are fatal to this model, never random predictions.
     """
-    try:
-        import torch
-        from transformers import Wav2Vec2Processor
-        from transformers.models.wav2vec2.modeling_wav2vec2 import Wav2Vec2Model, Wav2Vec2PreTrainedModel
+    global _model_processor_instance, _model_processor_loaded
+    if _model_processor_loaded:
+        return _model_processor_instance
+    with _model_processor_lock:
+        if _model_processor_loaded:         # double-checked locking
+            return _model_processor_instance
+        try:
+            import torch
+            from transformers import Wav2Vec2Processor
+            from transformers.models.wav2vec2.modeling_wav2vec2 import Wav2Vec2Model, Wav2Vec2PreTrainedModel
 
-        class RegressionHead(torch.nn.Module):
-            def __init__(self, config):
-                super().__init__()
-                self.dense = torch.nn.Linear(config.hidden_size, config.hidden_size)
-                self.dropout = torch.nn.Dropout(config.final_dropout)
-                self.out_proj = torch.nn.Linear(config.hidden_size, config.num_labels)
+            class RegressionHead(torch.nn.Module):
+                def __init__(self, config):
+                    super().__init__()
+                    self.dense = torch.nn.Linear(config.hidden_size, config.hidden_size)
+                    self.dropout = torch.nn.Dropout(config.final_dropout)
+                    self.out_proj = torch.nn.Linear(config.hidden_size, config.num_labels)
 
-            def forward(self, features):
-                return self.out_proj(self.dropout(torch.tanh(self.dense(self.dropout(features)))))
+                def forward(self, features):
+                    return self.out_proj(self.dropout(torch.tanh(self.dense(self.dropout(features)))))
 
-        class EmotionModel(Wav2Vec2PreTrainedModel):
-            def __init__(self, config):
-                super().__init__(config)
-                self.wav2vec2 = Wav2Vec2Model(config)
-                self.classifier = RegressionHead(config)
-                self.init_weights()
+            class EmotionModel(Wav2Vec2PreTrainedModel):
+                def __init__(self, config):
+                    super().__init__(config)
+                    self.wav2vec2 = Wav2Vec2Model(config)
+                    self.classifier = RegressionHead(config)
+                    self.init_weights()
 
-            def forward(self, input_values):
-                return self.classifier(self.wav2vec2(input_values)[0].mean(dim=1))
+                def forward(self, input_values):
+                    return self.classifier(self.wav2vec2(input_values)[0].mean(dim=1))
 
-        options = {"revision": MODEL_REVISION}
-        processor = Wav2Vec2Processor.from_pretrained(MODEL_NAME, **options)
-        model, info = EmotionModel.from_pretrained(
-            MODEL_NAME, output_loading_info=True, use_safetensors=True, **options)
-        _validate_loaded_weights(info)
-        model.eval()
-        logger.info("[voice-emotion] trained model loaded revision=%s", MODEL_REVISION)
-        return processor, model
-    except Exception as exc:
-        logger.warning("[voice-emotion] could not load model: %s", exc)
-        return None, None
+            options = {"revision": MODEL_REVISION}
+            processor = Wav2Vec2Processor.from_pretrained(MODEL_NAME, **options)
+            model, info = EmotionModel.from_pretrained(
+                MODEL_NAME, output_loading_info=True, use_safetensors=True, **options)
+            _validate_loaded_weights(info)
+            model.eval()
+            logger.info("[voice-emotion] trained model loaded revision=%s", MODEL_REVISION)
+            _model_processor_instance = (processor, model)
+        except Exception as exc:
+            logger.warning("[voice-emotion] could not load model: %s", exc)
+            _model_processor_instance = (None, None)
+        _model_processor_loaded = True
+        _log_rss("[voice-emotion] _get_model_processor loaded")
+        return _model_processor_instance
 
 
 def _validate_loaded_weights(info: dict) -> None:
@@ -103,7 +122,12 @@ def _decode_pcm(b64_data: str, sample_rate: int) -> Optional[Tuple["Any", int]]:
 
 def _predict_dimensions(samples: "Any") -> Optional[Dict[str, float]]:
     """Run the model and return arousal/valence/dominance in [0, 1]."""
-    processor, model = _get_model_processor()
+    result = _get_model_processor()
+    # _get_model_processor now returns a tuple; unpack accordingly
+    if isinstance(result, tuple):
+        processor, model = result
+    else:
+        processor, model = None, None
     if processor is None or model is None:
         return None
 

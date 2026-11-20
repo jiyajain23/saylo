@@ -13,8 +13,10 @@ Maps to interview-relevant signals:
 from __future__ import annotations
 
 import logging
-from functools import lru_cache
+import threading
 from typing import Any, Dict, List
+
+from modules.model_registry import _log_rss
 
 logger = logging.getLogger(__name__)
 
@@ -31,25 +33,40 @@ _CONFIDENCE_IMPACT: Dict[str, float] = {
     "disgust": -0.04,
 }
 
+# ── Thread-safe singleton ──────────────────────────────────────────────────────
 
-@lru_cache(maxsize=1)
+_pipeline_lock = threading.Lock()
+_pipeline_instance = None
+_pipeline_loaded = False
+
+
 def _get_pipeline():
-    try:
-        from transformers import pipeline  # type: ignore
-        logger.info("[emotion] loading text emotion model: %s", MODEL_NAME)
-        pipe = pipeline(
-            "text-classification",
-            model=MODEL_NAME,
-            top_k=None,           # return all labels with scores
-            device=-1,            # CPU
-            truncation=True,
-            max_length=512,
-        )
-        logger.info("[emotion] model loaded")
-        return pipe
-    except Exception as exc:
-        logger.warning("[emotion] could not load model: %s", exc)
-        return None
+    """Return the text-emotion pipeline (thread-safe, loads once)."""
+    global _pipeline_instance, _pipeline_loaded
+    if _pipeline_loaded:
+        return _pipeline_instance
+    with _pipeline_lock:
+        if _pipeline_loaded:                # double-checked locking
+            return _pipeline_instance
+        try:
+            from transformers import pipeline  # type: ignore
+            logger.info("[emotion] loading text emotion model: %s", MODEL_NAME)
+            pipe = pipeline(
+                "text-classification",
+                model=MODEL_NAME,
+                top_k=None,           # return all labels with scores
+                device=-1,            # CPU
+                truncation=True,
+                max_length=512,
+            )
+            logger.info("[emotion] model loaded")
+            _pipeline_instance = pipe
+        except Exception as exc:
+            logger.warning("[emotion] could not load model: %s", exc)
+            _pipeline_instance = None
+        _pipeline_loaded = True
+        _log_rss("[emotion] _get_pipeline loaded")
+        return _pipeline_instance
 
 
 def analyze_emotion(text: str) -> Dict[str, Any]:

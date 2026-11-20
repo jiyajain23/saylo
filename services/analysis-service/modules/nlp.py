@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import threading
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -37,43 +38,73 @@ VAGUE_OPENER_RE = re.compile(
     re.I,
 )
 
-def _get_star_path() -> Optional[pathlib.Path]:
+def _get_star_target() -> Optional[str]:
     import pathlib
     custom = os.environ.get("STAR_MODEL_PATH")
-    if custom:
-        p = pathlib.Path(custom).resolve()
+    if custom and custom.strip():
+        p = pathlib.Path(custom.strip()).resolve()
         if p.exists():
-            return p
+            return str(p)
+        # Hugging Face Hub repo ID (e.g. 'username/model-name')
+        return custom.strip()
     root = pathlib.Path(__file__).resolve().parent.parent.parent.parent
     for candidate in [root / "model" / "star_answer", root / "models" / "star_answer"]:
         if candidate.exists():
-            return candidate
+            return str(candidate)
     return None
 
+def _get_star_path():
+    return _get_star_target()
 
-@lru_cache(maxsize=1)
+
+# ── Thread-safe singleton for STAR classifier ─────────────────────────────────
+
+_star_lock = threading.Lock()
+_star_instance = None   # tuple: (tokenizer, model) | (None, None)
+_star_loaded = False
+
+
 def _get_star_model():
-    """Load the fine-tuned STAR DistilBERT classifier (3-output regression)."""
-    model_path = _get_star_path()
-    if not model_path:
-        logger.info("[nlp] STAR model directory (model/star_answer) not found — skipping")
-        return None, None
-    try:
+    """Load the fine-tuned STAR DistilBERT classifier (thread-safe, loads once)."""
+    global _star_instance, _star_loaded
+    if _star_loaded:
+        return _star_instance
+    with _star_lock:
+        if _star_loaded:
+            return _star_instance
+        target = _get_star_target()
+        if not target:
+            logger.info("[nlp] STAR model directory (model/star_answer) not found — skipping")
+            _star_instance = (None, None)
+            _star_loaded = True
+            return _star_instance
         try:
-            from transformers import AutoTokenizer, AutoModelForSequenceClassification  # type: ignore
-        except (ImportError, AttributeError):
-            from transformers.models.auto.tokenization_auto import AutoTokenizer  # type: ignore
-            from transformers.models.auto.modeling_auto import AutoModelForSequenceClassification  # type: ignore
-        import torch  # type: ignore
-        logger.info("[nlp] loading STAR classifier from %s", model_path)
-        tokenizer = AutoTokenizer.from_pretrained(str(model_path))
-        model = AutoModelForSequenceClassification.from_pretrained(str(model_path))
-        model.eval()
-        logger.info("[nlp] STAR classifier loaded successfully — outputs: structure, relevance, overall")
-        return tokenizer, model
-    except Exception as exc:
-        logger.warning("[nlp] STAR classifier load failed: %s", exc)
-        return None, None
+            try:
+                from transformers import AutoTokenizer, AutoModelForSequenceClassification  # type: ignore
+            except (ImportError, AttributeError):
+                from transformers.models.auto.tokenization_auto import AutoTokenizer  # type: ignore
+                from transformers.models.auto.modeling_auto import AutoModelForSequenceClassification  # type: ignore
+            import torch  # type: ignore
+            logger.info("[nlp] loading STAR classifier from %s", target)
+            tokenizer = AutoTokenizer.from_pretrained(target)
+            model = AutoModelForSequenceClassification.from_pretrained(target)
+            model.eval()
+            logger.info("[nlp] STAR classifier loaded successfully — outputs: structure, relevance, overall")
+            _star_instance = (tokenizer, model)
+            from modules.model_registry import _log_rss
+            _log_rss("[nlp] STAR classifier loaded")
+        except Exception as exc:
+            logger.warning("[nlp] STAR classifier load failed: %s", exc)
+            _star_instance = (None, None)
+        _star_loaded = True
+        return _star_instance
+
+
+def clear_star_cache() -> None:
+    global _star_instance, _star_loaded
+    with _star_lock:
+        _star_instance = None
+        _star_loaded = False
 
 
 CROSS_ENCODER_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"

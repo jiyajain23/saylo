@@ -117,19 +117,19 @@ sequenceDiagram
 
 ##  AI & ML Models Specification
 
-saylo combines state-of-the-art vision, speech, semantic, and generative models:
+saylo combines state-of-the-art vision, speech, semantic, and generative models, optimized with thread-safe singletons and memory-mapped safetensors to operate smoothly even in memory-constrained cloud environments (e.g. 512 MB RAM):
 
 | Component | Architecture / Model | Source / Checkpoint | Primary Purpose |
 | :--- | :--- | :--- | :--- |
 | **Conversational Coach** | Multimodal LLM | `gemini-2.0-flash-exp` | Real-time adaptive questioning, follow-ups, persona roleplay, dynamic pressure |
 | **In-Browser Face Mesh** | BlazeFace / FaceLandmarker | `MediaPipe FaceLandmarker Float16` | Eye contact angle, head tilt, facial orientation (runs client-side GPU/Wasm) |
 | **In-Browser Body Pose** | BlazePose / PoseLandmarker | `MediaPipe PoseLandmarker Lite Float16` | Posture alignment, slouch detection, nervous swaying/movement frequency |
-| **STAR Answer Classifier** | Fine-Tuned Transformer | Custom trained (`model/star_answer`) | Evaluates behavioral answer structure: Situation, Task, Action, Result |
-| **Contextual Relevance** | Cross-Encoder | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Deep cross-attention score between user answers and role requirements |
+| **STAR Answer Classifier** | Fine-Tuned Transformer | Custom (`model/star_answer` or Hugging Face Hub via `STAR_MODEL_PATH`) | Evaluates behavioral answer structure: Situation, Task, Action, Result |
+| **Contextual Relevance** | Cross-Encoder | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Deep cross-attention score between user answers and role requirements (fallback when STAR classifier is not loaded) |
 | **Semantic Embeddings** | Sentence Transformer | `sentence-transformers/all-MiniLM-L6-v2` | Signal matching, question-answer alignment, semantic job profile matching |
-| **Vocal Affect & Emotion** | Wav2Vec2 + Custom MLP Head | `audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim` | Continuous 3D emotion dimensions: Arousal (energy), Valence, Dominance (assertiveness) |
-| **Textual Emotion** | DistilRoBERTa Classifier | `j-hartmann/emotion-english-distilroberta-base` | Detects confidence-impacting emotions: joy, fear, sadness, anger, surprise |
-| **Acoustic Signal Metrics** | DSP & Librosa Pipeline | Librosa / SciPy | Pitch variation (F0), speaking rate (WPM), pause durations, vocal jitter |
+| **Voice & Pitch Analysis** | DSP & Librosa Pipeline | Librosa / SciPy | Pitch variation (F0), vocal projection (RMS), speaking rate (WPM), pause distribution, and monotone detection |
+| **Vocal Affect (Optional)** | Wav2Vec2 + MLP Head | `audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim` | Optional 3D emotion dimensions: Arousal, Dominance, Valence (toggled via `ENABLE_VOICE_TRANSFORMER=true`) |
+| **Textual Emotion** | DistilRoBERTa Classifier | `j-hartmann/emotion-english-distilroberta-base` | Detects confidence-impacting emotions in transcript words: joy, fear, sadness, anger, surprise |
 
 ---
 
@@ -261,6 +261,19 @@ Create `.env.local` in `frontend/`:
 ```env
 NEXT_PUBLIC_API_BASE=http://localhost:5000
 NEXT_PUBLIC_WS_BASE=ws://localhost:5000/ws
+```
+
+Create `.env` in `services/analysis-service/` (optional model configurations):
+```env
+# Optional: Custom STAR classifier (local path or Hugging Face Hub repo ID e.g. "your-username/star-answer-classifier")
+# If unset, automatically falls back to local "model/star_answer" or Cross-Encoder
+STAR_MODEL_PATH=
+
+# Optional: If your Hugging Face model repository is Private
+# HF_TOKEN=hf_your_token_here
+
+# Optional: Enable heavy Wav2Vec2 neural voice model (requires >= 1 GB RAM; default: false for fast Librosa DSP)
+# ENABLE_VOICE_TRANSFORMER=false
 ```
 
 ---

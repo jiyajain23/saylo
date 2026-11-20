@@ -86,16 +86,18 @@ def voice_node(state: AnalysisState) -> Dict[str, Any]:
         from modules.voice import _neutral_result as librosa_neutral
         return {"voice": librosa_neutral("no_audio")}
 
-    # Try wav2vec2 emotion model first
-    try:
-        from modules.voice_emotion import analyze_voice_emotion
-        result = analyze_voice_emotion(audio_b64, sr)
-        if result.get("available"):
-            logger.info("[node:voice] wav2vec2 arousal=%.3f dom=%.3f val=%.3f",
-                        result["arousal"], result["dominance"], result["valence"])
-            return {"voice": result}
-    except Exception as exc:
-        logger.warning("[node:voice] wav2vec2 failed, falling back to librosa: %s", exc)
+    # Try wav2vec2 emotion model only if explicitly enabled (saves ~360 MB RAM on 512 MB instances)
+    import os
+    if os.environ.get("ENABLE_VOICE_TRANSFORMER", "false").lower() == "true":
+        try:
+            from modules.voice_emotion import analyze_voice_emotion
+            result = analyze_voice_emotion(audio_b64, sr)
+            if result.get("available"):
+                logger.info("[node:voice] wav2vec2 arousal=%.3f dom=%.3f val=%.3f",
+                            result["arousal"], result["dominance"], result["valence"])
+                return {"voice": result}
+        except Exception as exc:
+            logger.warning("[node:voice] wav2vec2 failed, falling back to librosa: %s", exc)
 
     # Fallback: librosa heuristics
     try:

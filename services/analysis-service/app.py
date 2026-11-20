@@ -76,10 +76,39 @@ async def on_startup() -> None:
 
 def _load_nlp_models() -> None:
     """Warm shared models sequentially so cold-start peak RSS is measurable."""
+    from modules.model_registry import _log_rss
+    _log_rss("[warmup] baseline RSS before model loading")
     try:
-        from modules.model_registry import sentence_model, cross_encoder
+        from modules.model_registry import sentence_model
         sentence_model()
-        cross_encoder()
-        logger.info("[warmup] sentence-transformer + cross-encoder loaded")
+        logger.info("[warmup] sentence-transformer loaded")
+    except Exception as exc:
+        logger.warning("[warmup] sentence-transformer model load failed: %s", exc)
+    try:
+        from modules.nlp import _get_star_model
+        star_tok, star_mod = _get_star_model()
+        if star_mod is not None:
+            logger.info("[warmup] STAR classifier loaded (skipping cross-encoder fallback)")
+        else:
+            from modules.model_registry import cross_encoder
+            cross_encoder()
+            logger.info("[warmup] cross-encoder loaded")
     except Exception as exc:
         logger.warning("[warmup] NLP model load failed: %s", exc)
+    try:
+        from modules.emotion import _get_pipeline as _get_emotion_pipeline
+        _get_emotion_pipeline()
+        logger.info("[warmup] text-emotion pipeline loaded")
+    except Exception as exc:
+        logger.warning("[warmup] text-emotion model load failed: %s", exc)
+    if os.environ.get("ENABLE_VOICE_TRANSFORMER", "false").lower() == "true":
+        try:
+            from modules.voice_emotion import _get_model_processor
+            _get_model_processor()
+            logger.info("[warmup] voice-emotion model loaded")
+        except Exception as exc:
+            logger.warning("[warmup] voice-emotion model load failed: %s", exc)
+    else:
+        logger.info("[warmup] voice transformer disabled (using lightweight Librosa DSP for voice)")
+    from modules.model_registry import _log_rss as _log_rss2
+    _log_rss2("[warmup] peak RSS after all models loaded")

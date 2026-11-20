@@ -154,6 +154,15 @@ def run_analysis(
         bool(video_frames_b64),
     )
 
+    # Thread-safety note: the 6 fan-out nodes (speech, nlp, alignment, voice,
+    # emotion, vision) run concurrently via LangGraph. All calls to
+    # sentence_model(), cross_encoder(), _get_pipeline(), and
+    # _get_model_processor() now use threading.Lock double-checked locking in
+    # model_registry / emotion / voice_emotion, so concurrent first-calls will
+    # block rather than each loading the full model — no duplicate loading.
+    # By startup warmup time all models are already resident, so the lock is
+    # uncontested on every real request.
+
     token = _progress_sink.set(progress_callback)
     _emit("analysis", "started")
     try:
